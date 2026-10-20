@@ -1,0 +1,637 @@
+{
+  "status": "split_complete_pending_model_input_adaptation",
+  "version": "query_dedup_val10_seed42_20261018",
+  "seed": 42,
+  "validation_rows_per_source": 10,
+  "policy": {
+    "enabled_sources": [
+      "locomo",
+      "perltqa_en",
+      "perltqa_zh",
+      "personamem_128k",
+      "personamem_32k",
+      "personamem_v2_128k",
+      "split_longmemeval_m",
+      "split_longmemeval_s",
+      "zh4o"
+    ],
+    "query_field": "question",
+    "query_equality": "exact original string, no normalization",
+    "test_filter_scope": "same source only; cross-source train/test duplicates are reported, not additionally removed",
+    "validation_selection": "random.Random(42).sample(sorted(eligible_query_strings), 10); source-original row order retained in output",
+    "validation_query_eligibility": "one remaining occurrence, no occurrence in any other remaining training source or any source test",
+    "longmemeval_exception": "the same 10 queries, each unique per variant and absent elsewhere, are assigned to validation in both s/m",
+    "history_isolation": false,
+    "preserve_original_columns_and_values": true,
+    "test_policy": "byte-identical copy of each original test.parquet",
+    "extra_data_removal": false
+  },
+  "totals": {
+    "original_train_rows": 12872,
+    "removed_train_rows": 538,
+    "train_rows": 12244,
+    "validation_rows": 90,
+    "test_rows": 3100
+  },
+  "sources": [
+    {
+      "source": "locomo",
+      "original_train_rows": 1136,
+      "removed_train_rows": 2,
+      "train_rows": 1124,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 1118,
+      "validation_original_row_indices": [
+        50,
+        91,
+        123,
+        209,
+        260,
+        296,
+        469,
+        593,
+        689,
+        780
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 7,
+        "validation_rows_matching_train": 10,
+        "validation_rows_matching_test": 10
+      },
+      "input_files": [
+        {
+          "path": "data/locomo/train.parquet",
+          "bytes": 27401564,
+          "mtime_ns": 1792054571118238010,
+          "sha256": "44553f1ae90a455e7f9ede1ad0b8ab71c4301c620f06a8174081a82c4169b64e"
+        },
+        {
+          "path": "data/locomo/test.parquet",
+          "bytes": 10265784,
+          "mtime_ns": 1792054510172044444,
+          "sha256": "93f5c662b6367fea256ad5dc564d4920e6ba87850a8d6d52a1cccb41e54973ba"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 1124,
+          "ordered_row_content_sha256": "6dd6fcd1efeb3a1d0e3e1d02a55b3d9fe5eb842b3ab215adf91624c7a65b5f5d",
+          "bytes": 15524839,
+          "sha256": "44309f042bd03ae7a16f3676e90a67fd569da2ece5d41ff43863bc958201e102"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "483d57b50c8f431ed17dba89339b54e9756282a2585e6593de768357adc25eff",
+          "bytes": 397554,
+          "sha256": "00a2260ee34e0c0122b4789759326f9658afa5f5f0bc63db66f7969ec2a9e189"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 10265784,
+          "sha256": "93f5c662b6367fea256ad5dc564d4920e6ba87850a8d6d52a1cccb41e54973ba"
+        }
+      }
+    },
+    {
+      "source": "perltqa_en",
+      "original_train_rows": 2438,
+      "removed_train_rows": 6,
+      "train_rows": 2422,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 2426,
+      "validation_original_row_indices": [
+        310,
+        339,
+        506,
+        1031,
+        1035,
+        1056,
+        1277,
+        1694,
+        1796,
+        2112
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 1,
+        "validation_rows_matching_train": 10,
+        "validation_rows_matching_test": 10
+      },
+      "input_files": [
+        {
+          "path": "data/perltqa_en/train.parquet",
+          "bytes": 2882740130,
+          "mtime_ns": 1792056543144577762,
+          "sha256": "2a306a5dcb91da5d4bf819b4c44ad1e83897620a78db9e54c27be861cc6485e5"
+        },
+        {
+          "path": "data/perltqa_en/test.parquet",
+          "bytes": 10113105,
+          "mtime_ns": 1792054518918049906,
+          "sha256": "b2912380fd1e9151dc4309c17bcc624d292b697d91060321fba17220cc03c434"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 2422,
+          "ordered_row_content_sha256": "5f88acab8c87f71eb370d8adb32028d874fdf9d4867ac876024095cfd6689e79",
+          "bytes": 158060598,
+          "sha256": "76584745dffe6d073b4ee6d800eb4a5e690a1845abd8b1f8567ae79664207da3"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "ba3d23e34d1cfd3ebf19969f58bc4405468d7c2196cece74d510ca13c986cbea",
+          "bytes": 11584978,
+          "sha256": "91f9da14c20a02386a183b9a7da1ee9a69a9b9aa89fdbeee930343985e6f209b"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 10113105,
+          "sha256": "b2912380fd1e9151dc4309c17bcc624d292b697d91060321fba17220cc03c434"
+        }
+      }
+    },
+    {
+      "source": "perltqa_zh",
+      "original_train_rows": 2438,
+      "removed_train_rows": 3,
+      "train_rows": 2425,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 2433,
+      "validation_original_row_indices": [
+        287,
+        578,
+        780,
+        969,
+        1253,
+        1283,
+        1298,
+        1889,
+        2025,
+        2104
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 1,
+        "validation_rows_matching_train": 10,
+        "validation_rows_matching_test": 10
+      },
+      "input_files": [
+        {
+          "path": "data/perltqa_zh/train.parquet",
+          "bytes": 3227180828,
+          "mtime_ns": 1792056533190957985,
+          "sha256": "fe9a2af1001a51ef3b6747a54b85da918f41f947751218ef0de7513e4dea7738"
+        },
+        {
+          "path": "data/perltqa_zh/test.parquet",
+          "bytes": 10333682,
+          "mtime_ns": 1792054519289975074,
+          "sha256": "2e02a7435aac3dfe7539529bd19b1151a4c6b3884a4ce6a6adf364b99ae30d38"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 2425,
+          "ordered_row_content_sha256": "eeab807d6b6cd95d9d7f190fea305bcf9b3c56301ea5afdad13f7b996942d739",
+          "bytes": 158775802,
+          "sha256": "81b560fd98308cb07e1e039e291ffcc56c45146299893b247db38c72dbfedd38"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "398885c006fcd55a28f61cf0c4ba284bf502d303709a0fa014004ba827909d8e",
+          "bytes": 11591643,
+          "sha256": "e789885a73c15bad56db1a96074e2c66f10948d6e9d84c45f886f3c210aa1d69"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 10333682,
+          "sha256": "2e02a7435aac3dfe7539529bd19b1151a4c6b3884a4ce6a6adf364b99ae30d38"
+        }
+      }
+    },
+    {
+      "source": "personamem_128k",
+      "original_train_rows": 2303,
+      "removed_train_rows": 418,
+      "train_rows": 1875,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 540,
+      "validation_original_row_indices": [
+        0,
+        41,
+        78,
+        654,
+        1043,
+        1224,
+        1245,
+        1490,
+        1680,
+        1776
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 7,
+        "validation_rows_matching_train": 8,
+        "validation_rows_matching_test": 8
+      },
+      "input_files": [
+        {
+          "path": "data/personamem_128k/train.parquet",
+          "bytes": 355189626,
+          "mtime_ns": 1792054844535375784,
+          "sha256": "6ef5c0a2ed43e4d04645cb676c12d42408ddd0b9259f984b28eaa4b21c654a53"
+        },
+        {
+          "path": "data/personamem_128k/test.parquet",
+          "bytes": 32307150,
+          "mtime_ns": 1792054546004535621,
+          "sha256": "097d32aff3a05ccd031afa138d4d387737f0839318525fc64ecefbac9cb935c5"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 1875,
+          "ordered_row_content_sha256": "d52d9ea91f38ed6a2c18d110482a5a4451e6246f351a621deb4ccbc1331b646c",
+          "bytes": 303028023,
+          "sha256": "2126b86618325b84b319465505437d1a45c0e441e5ee830d8a40c2a0c807e8b4"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "42fdda3a55aa38a4b67a7f3b29f0dc12537fa269e3bdf2c1c5cc7b45d2031353",
+          "bytes": 2178354,
+          "sha256": "de655f91646d84e583cb4b07a17d01617cbe485bd9908526f4ee217876ea6c70"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 32307150,
+          "sha256": "097d32aff3a05ccd031afa138d4d387737f0839318525fc64ecefbac9cb935c5"
+        }
+      }
+    },
+    {
+      "source": "personamem_32k",
+      "original_train_rows": 189,
+      "removed_train_rows": 102,
+      "train_rows": 77,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 32,
+      "validation_original_row_indices": [
+        32,
+        37,
+        69,
+        124,
+        132,
+        143,
+        144,
+        165,
+        186,
+        188
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 3,
+        "validation_rows_matching_train": 3,
+        "validation_rows_matching_test": 3
+      },
+      "input_files": [
+        {
+          "path": "data/personamem_32k/train.parquet",
+          "bytes": 5373687,
+          "mtime_ns": 1792054537704240027,
+          "sha256": "d6bd7d879d55cc97a6fa8a4658268183de1eb80a718f0d3d9788c4f9b1bf598e"
+        },
+        {
+          "path": "data/personamem_32k/test.parquet",
+          "bytes": 8917132,
+          "mtime_ns": 1792054518971377026,
+          "sha256": "65d84094b42a86f3994b009bab2854e799a5898981c413861094f09651113d79"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 77,
+          "ordered_row_content_sha256": "de02a3c7d921572049cd433a94f1013118cebb844558d461f56df54481340ad0",
+          "bytes": 2826486,
+          "sha256": "2f7a36aebcca248b2d5d125ea17c8dd961c175820afb2ca8bdbfa8d6ba07d868"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "b40aaf7d6977e75617ab6b3755e1832acdbf3e62390c69e33dc25f5662a16f99",
+          "bytes": 561620,
+          "sha256": "8c7926362d35ea87071d0fde89f5594d7e6423c54ce7f4c452a527b7c23f0a99"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 8917132,
+          "sha256": "65d84094b42a86f3994b009bab2854e799a5898981c413861094f09651113d79"
+        }
+      }
+    },
+    {
+      "source": "personamem_v2_128k",
+      "original_train_rows": 3000,
+      "removed_train_rows": 7,
+      "train_rows": 2983,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 2937,
+      "validation_original_row_indices": [
+        18,
+        190,
+        420,
+        851,
+        912,
+        944,
+        976,
+        1354,
+        1495,
+        2439
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 4,
+        "validation_rows_matching_train": 4,
+        "validation_rows_matching_test": 1
+      },
+      "input_files": [
+        {
+          "path": "data/personamem_v2_128k/train.parquet",
+          "bytes": 534667621,
+          "mtime_ns": 1792055074041005090,
+          "sha256": "a11137a5b3ad9e04ceedce2e9dfc6117f384ba32ad2896443d260df6b9b1f740"
+        },
+        {
+          "path": "data/personamem_v2_128k/test.parquet",
+          "bytes": 67918308,
+          "mtime_ns": 1792054590423272659,
+          "sha256": "75e7c8149336e2d170a6ace20206dbb6f9e9534ac518ddc32ced333f9b6c8ef1"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 2983,
+          "ordered_row_content_sha256": "bf4377400cc98ea689ade0393ec25397e17c117090862d113c319105e654c940",
+          "bytes": 343164436,
+          "sha256": "1e52a39fc4eac7663717b9652e614d705f2679418457d7baa1ebc6e39f157bd8"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "918fc8a68e9d019fe89ec4b3e0c3d4bd9986ccf6db54ee1dc16c37af767e0c87",
+          "bytes": 1870065,
+          "sha256": "0351f908afea76c37b207bee84c0583f461b9f788f021c1a3642608df22e72a6"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 67918308,
+          "sha256": "75e7c8149336e2d170a6ace20206dbb6f9e9534ac518ddc32ced333f9b6c8ef1"
+        }
+      }
+    },
+    {
+      "source": "split_longmemeval_m",
+      "original_train_rows": 350,
+      "removed_train_rows": 0,
+      "train_rows": 340,
+      "validation_rows": 10,
+      "test_rows": 150,
+      "validation_selection_pool_rows": 350,
+      "validation_original_row_indices": [
+        86,
+        188,
+        211,
+        225,
+        251,
+        254,
+        274,
+        280,
+        320,
+        335
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 0,
+        "validation_rows_matching_train": 0,
+        "validation_rows_matching_test": 0
+      },
+      "input_files": [
+        {
+          "path": "data/split_longmemeval_m/train.parquet",
+          "bytes": 579305116,
+          "mtime_ns": 1792055241085891391,
+          "sha256": "f9d3f0e77f7a351ff7933dab0816856b3d133376cb8b36bbbd60c37a99ff7b40"
+        },
+        {
+          "path": "data/split_longmemeval_m/test.parquet",
+          "bytes": 247462277,
+          "mtime_ns": 1792055265911840134,
+          "sha256": "fa59e7c6f65c831d26b3e34a24eb2fdc02c65552dadf51c65c0fecf258b7de4b"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 340,
+          "ordered_row_content_sha256": "c6795a7f35763c4608de6ea571ed9a0f277417f52c713882cdf5a7eb2433ce06",
+          "bytes": 501185755,
+          "sha256": "eed287922305c937ca9a5ca3f4b7fd3ac0da2e2cb0c1d5e3f165964bd6cdc89a"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "b31dc92f56b82e6cfcb5cea75ac9f924e697e55bff085ea73e739e30cd20abe8",
+          "bytes": 14865159,
+          "sha256": "b525b31b1dda4df97badd00d26c6f852ab9c9cc3611c5dc1ee5a84c3f6bcf450"
+        },
+        "test": {
+          "rows": 150,
+          "bytes": 247462277,
+          "sha256": "fa59e7c6f65c831d26b3e34a24eb2fdc02c65552dadf51c65c0fecf258b7de4b"
+        }
+      }
+    },
+    {
+      "source": "split_longmemeval_s",
+      "original_train_rows": 350,
+      "removed_train_rows": 0,
+      "train_rows": 340,
+      "validation_rows": 10,
+      "test_rows": 150,
+      "validation_selection_pool_rows": 350,
+      "validation_original_row_indices": [
+        4,
+        6,
+        86,
+        87,
+        113,
+        136,
+        218,
+        278,
+        279,
+        337
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 0,
+        "validation_rows_matching_train": 0,
+        "validation_rows_matching_test": 0
+      },
+      "input_files": [
+        {
+          "path": "data/split_longmemeval_s/train.parquet",
+          "bytes": 58705175,
+          "mtime_ns": 1792054675814855897,
+          "sha256": "6d845bc075ffd3563591f8233ddd15067408ee49b923c0c1f045ed2bc1886672"
+        },
+        {
+          "path": "data/split_longmemeval_s/test.parquet",
+          "bytes": 25193547,
+          "mtime_ns": 1792054629938473002,
+          "sha256": "7f23adb170ba73ac370b2bbb946e2821869e5f2871e5d3c4a8e11e42672dd033"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 340,
+          "ordered_row_content_sha256": "c03ce06cd31468c8c9653c0772ec42ddde7a42a63c5752d06366d046e5f88120",
+          "bytes": 50835273,
+          "sha256": "fb4399dce3fe761180ec4fc65affe3e80aef89a6c04ef231569dfefbe40c491d"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "4b451046d3a6c2ade26c8fa1a0ba4cbb47953294f90ad81c13548227d9465320",
+          "bytes": 1558406,
+          "sha256": "a9520c5ce322e76eaf617cd95e935622a54f2694a51b3332fec674f3eeea2a04"
+        },
+        "test": {
+          "rows": 150,
+          "bytes": 25193547,
+          "sha256": "7f23adb170ba73ac370b2bbb946e2821869e5f2871e5d3c4a8e11e42672dd033"
+        }
+      }
+    },
+    {
+      "source": "zh4o",
+      "original_train_rows": 668,
+      "removed_train_rows": 0,
+      "train_rows": 658,
+      "validation_rows": 10,
+      "test_rows": 400,
+      "validation_selection_pool_rows": 667,
+      "validation_original_row_indices": [
+        52,
+        139,
+        186,
+        231,
+        400,
+        466,
+        479,
+        481,
+        527,
+        640
+      ],
+      "query_overlap": {
+        "train_test": 0,
+        "validation_test": 0,
+        "train_validation": 0
+      },
+      "exact_ordered_history_overlap": {
+        "train_validation_distinct": 10,
+        "validation_rows_matching_train": 10,
+        "validation_rows_matching_test": 10
+      },
+      "input_files": [
+        {
+          "path": "data/zh4o/train.parquet",
+          "bytes": 22034381,
+          "mtime_ns": 1792054715324435143,
+          "sha256": "a0e28134c5ebbc9e7dab0e7cb71f813e53ec797ebb47b70b19b88472da4c4581"
+        },
+        {
+          "path": "data/zh4o/test.parquet",
+          "bytes": 13593233,
+          "mtime_ns": 1792054671837378705,
+          "sha256": "9926037726a42ebdc7e382b32acaa63914a9160da083c4dd8a42e49e3df7b0e7"
+        }
+      ],
+      "output_files": {
+        "train": {
+          "rows": 658,
+          "ordered_row_content_sha256": "ce8eb39af9d216f60d4c735c20094655abd0a8a2a5393c91d04a6f304d08f332",
+          "bytes": 14408133,
+          "sha256": "3f7464f37992b4ba28b61203cd6f989428d68ee802f1faf9832972d899bb7508"
+        },
+        "validation": {
+          "rows": 10,
+          "ordered_row_content_sha256": "4c9c0c6544f1483f5f57c3fc947c9c399c5be8c44033c473f1d51f52ab389ac2",
+          "bytes": 378776,
+          "sha256": "52ecec1872f74680ec2ef74a17674d3235ae83ae911e709c509f390ccb7b4755"
+        },
+        "test": {
+          "rows": 400,
+          "bytes": 13593233,
+          "sha256": "9926037726a42ebdc7e382b32acaa63914a9160da083c4dd8a42e49e3df7b0e7"
+        }
+      }
+    }
+  ],
+  "global_query_overlap": {
+    "train_validation_distinct": 0,
+    "validation_test_distinct": 0,
+    "train_test_cross_source_distinct": 47,
+    "validation_distinct_queries": 80
+  },
+  "global_exact_ordered_history_overlap": {
+    "train_validation_distinct": 33,
+    "validation_rows_matching_train": 55
+  },
+  "known_issues": [
+    {
+      "source": "zh4o",
+      "original_file": "data/zh4o/train.parquet",
+      "original_row_index": 542,
+      "issue": "reference answer is not A/B/C/D",
+      "action": "retained in train, excluded from validation candidate pool; flag for later QA adaptation"
+    },
+    "This stage preserves source schemas, answers and historical annotation fields; use model-input allowlists and annotation cleaning before Writer/Reader/Task Agent calls.",
+    "Exact or partial history overlap is not excluded by this query-based split."
+  ],
+  "verification": "Output schema and ordered all-column row fingerprints recomputed from materialized files; original tests verified byte-identical; input size/mtime unchanged.",
+  "elapsed_seconds": 414.9
+}

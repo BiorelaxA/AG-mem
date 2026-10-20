@@ -1,0 +1,56 @@
+seed: 42
+data:
+  input_root: data/processed/query_dedup_val10_seed42_20261018
+  prepared_root: data/prepared/session_jsonl_v2
+  sources: [locomo, perltqa_en, perltqa_zh, personamem_128k, personamem_32k, personamem_v2_128k, split_longmemeval_m, split_longmemeval_s, zh4o]
+  splits: [train, validation, test]
+models:
+  reader_path: /home/share/models/Qwen3.5-4B
+  task_path: /home/share/models/Qwen3.5-27B
+memory:
+  record_unit: session
+service:
+  base_url: http://127.0.0.1:8000/v1
+  model: agmem-27b
+  api_key_env: AGMEM_API_KEY
+  timeout_seconds: 600
+  retries: 2
+writer:
+  lookback_sessions: 5
+  content_max_tokens: 200
+  max_output_tokens: 384
+  format_retries: 2
+reader:
+  device: cuda:0
+  max_context_tokens: null  # Full session directory; no 32k filtering or hierarchy. Native model limit still applies.
+  max_new_tokens_per_decision: 256
+  rollout_temperature: 1.0
+  rollout_use_cache: true
+retrieval:
+  max_ids_per_call: 10
+  max_read_calls: 8
+task_agent:
+  max_output_tokens: 512
+  max_context_tokens: 65536  # Match the actual 27B service --max-model-len.
+reward:
+  read_call_cost: 0.01
+  format_penalty: 0.1  # Deduct once per rollout with any Reader format/protocol failure.
+  choice_outcome: label_f1
+  text_outcome: qa_f1_v1
+training:
+  parameterization: full
+  group_size: 8
+  optimizer: cpu_adamw_fp32
+  learning_rate: 0.000001
+  weight_decay: 0.0
+  epochs: 1
+  advantage_epsilon: 0.000001
+  clip_ratio: 0.2
+  kl_coefficient: 0.01
+  max_grad_norm: 1.0
+  group_infrastructure_retries: 1
+  validation_every: 100
+  checkpoint_every: 100
+  keep_last_checkpoints: 2
+  tensorboard: true  # Scalars are written to <output_dir>/tensorboard after each update.
+  output_dir: runs/session_grpo_v1

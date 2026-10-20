@@ -1,0 +1,186 @@
+{
+  "locomo": {
+    "train": {
+      "rows": 1124,
+      "nonempty_answer": 1124,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "examples": {}
+    }
+  },
+  "perltqa_en": {
+    "train": {
+      "rows": 2422,
+      "nonempty_answer": 2422,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "examples": {}
+    }
+  },
+  "perltqa_zh": {
+    "train": {
+      "rows": 2425,
+      "nonempty_answer": 2425,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "examples": {}
+    }
+  },
+  "personamem_128k": {
+    "train": {
+      "rows": 1875,
+      "nonempty_answer": 1875,
+      "correct_option_found": 1875,
+      "answer_matches_gold_option_text_stripped": 1875,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "correct_option_found": 10,
+      "answer_matches_gold_option_text_stripped": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "correct_option_found": 400,
+      "answer_matches_gold_option_text_stripped": 400,
+      "examples": {}
+    }
+  },
+  "personamem_32k": {
+    "train": {
+      "rows": 77,
+      "nonempty_answer": 77,
+      "correct_option_found": 77,
+      "answer_matches_gold_option_text_stripped": 77,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "correct_option_found": 10,
+      "answer_matches_gold_option_text_stripped": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "correct_option_found": 400,
+      "answer_matches_gold_option_text_stripped": 400,
+      "examples": {}
+    }
+  },
+  "personamem_v2_128k": {
+    "train": {
+      "rows": 2983,
+      "nonempty_answer": 2983,
+      "valid_incorrect_answer_list": 2981,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "valid_incorrect_answer_list": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "valid_incorrect_answer_list": 400,
+      "examples": {}
+    }
+  },
+  "split_longmemeval_m": {
+    "train": {
+      "rows": 340,
+      "nonempty_answer": 340,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 150,
+      "nonempty_answer": 150,
+      "examples": {}
+    }
+  },
+  "split_longmemeval_s": {
+    "train": {
+      "rows": 340,
+      "nonempty_answer": 340,
+      "examples": {}
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 150,
+      "nonempty_answer": 150,
+      "examples": {}
+    }
+  },
+  "zh4o": {
+    "train": {
+      "rows": 658,
+      "nonempty_answer": 658,
+      "answer_is_option_label": 657,
+      "four_options_parsed_strict": 657,
+      "gold_option_text_extractable": 657,
+      "invalid_option_label": 1,
+      "examples": {
+        "invalid_option_label": {
+          "row": 533,
+          "question_id": "question_5_821",
+          "answer": " coleção"
+        }
+      }
+    },
+    "validation": {
+      "rows": 10,
+      "nonempty_answer": 10,
+      "answer_is_option_label": 10,
+      "four_options_parsed_strict": 10,
+      "gold_option_text_extractable": 10,
+      "examples": {}
+    },
+    "test": {
+      "rows": 400,
+      "nonempty_answer": 400,
+      "answer_is_option_label": 400,
+      "four_options_parsed_strict": 400,
+      "gold_option_text_extractable": 400,
+      "examples": {}
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "status": "passed",
+  "checks": [
+    {
+      "source": "locomo",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "perltqa_en",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "perltqa_zh",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "personamem_128k",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "personamem_32k",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "personamem_v2_128k",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "split_longmemeval_m",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "split_longmemeval_s",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    },
+    {
+      "source": "zh4o",
+      "validation_rows": 10,
+      "original_row_partition_complete": true,
+      "query_checks_passed": true,
+      "schema_checks_passed": true
+    }
+  ],
+  "global_train_validation_query_overlap": 0,
+  "global_validation_test_query_overlap": 0,
+  "longmemeval_validation_queries_aligned": true,
+  "all_original_train_rows_accounted_for_exactly_once": true,
+  "environment": {
+    "python": "3.13.9",
+    "pyarrow": "22.0.0"
+  },
+  "scope": "Independent metadata, query and original-row partition verification. Full cell content and byte-identical test-copy checks are recorded by the materialization run in manifest.json."
+}

@@ -1,0 +1,8 @@
+# Copy to configs/local.yaml and set paths on the target machine.
+# configs/local.yaml is ignored; this example remains versioned.
+extends: default.yaml
+models:
+  reader_path: /absolute/path/to/models/Qwen3.5-4B
+  task_path: /absolute/path/to/models/Qwen3.5-27B
+service:
+  base_url: http://127.0.0.1:8000/v1

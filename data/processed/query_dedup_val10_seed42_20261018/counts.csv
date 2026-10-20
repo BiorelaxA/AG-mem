@@ -1,0 +1,11 @@
+source,original_train_rows,removed_train_rows,train_rows,validation_rows,test_rows
+locomo,1136,2,1124,10,400
+perltqa_en,2438,6,2422,10,400
+perltqa_zh,2438,3,2425,10,400
+personamem_128k,2303,418,1875,10,400
+personamem_32k,189,102,77,10,400
+personamem_v2_128k,3000,7,2983,10,400
+split_longmemeval_m,350,0,340,10,150
+split_longmemeval_s,350,0,340,10,150
+zh4o,668,0,658,10,400
+TOTAL,12872,538,12244,90,3100

@@ -1,0 +1,391 @@
+{
+  "status": "complete",
+  "date": "2026-10-18",
+  "dataset_version": "query_dedup_val10_seed42_20261018",
+  "scope": "Only final materialized train (12244 rows) and unchanged test (3100 rows); validation excluded.",
+  "method": {
+    "history_unit": "The complete haystack_sessions of one QA row, preserving session boundaries and the order of sessions and messages.",
+    "removed_annotation_fields": [
+      "has_answer",
+      "num_tokens"
+    ],
+    "preserved_message_fields": "Every other field, including role, name, content, timestamp, dia_id and any additional original fields.",
+    "serialization": "JSON with sorted object keys; strings are preserved byte-for-byte in UTF-8, without text normalization.",
+    "ordered_history": "SHA-256 of the ordered list of cleaned session content SHA-256 values; session IDs are not used.",
+    "unordered_history": "SHA-256 of the sorted list of cleaned session SHA-256 values; repeated sessions are retained as a multiset.",
+    "dated_ordered_history": "Ordered content fingerprint plus the complete original haystack_dates list, or null when absent.",
+    "exact_query": "Original question field without normalization.",
+    "normalized_query": "Unicode NFKC, casefold, then whitespace normalization; no punctuation or number removal.",
+    "query_with_options": "Original question plus all_options when present; this is not a final task-agent prompt.",
+    "exact_qa": "Original question plus original answer.",
+    "counting": "shared_distinct counts different content fingerprints shared across splits; test_rows_matching_other_split counts test rows whose fingerprint exists in train.",
+    "scope": "Every row of all 18 original train/test Parquet files; no sampled-only history conclusions.",
+    "limitations": [
+      "Exact identity does not detect paraphrases, approximate overlap, prefix histories or original-persona relationships.",
+      "The history comparison does not use question_date; dated_ordered_history includes session dates only.",
+      "No gold answers, raw history text or model weights were changed."
+    ]
+  },
+  "verification": "SHA-256 of each materialized train/test matches the split manifest. Exact query fingerprints re-read from current Parquet files. Full-history fingerprints mapped by original row indices from the previously completed full-content audit; output all-column integrity was verified during materialization.",
+  "sources": [
+    {
+      "source": "locomo",
+      "train_rows": 1124,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 10,
+        "train_rows_matching_test": 1124,
+        "test_rows_matching_train": 400
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 10,
+        "train_rows_matching_test": 1124,
+        "test_rows_matching_train": 400
+      },
+      "unordered_history": {
+        "shared_distinct": 10,
+        "train_rows_matching_test": 1124,
+        "test_rows_matching_train": 400
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "perltqa_en",
+      "train_rows": 2422,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2422,
+        "test_rows_matching_train": 400
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2422,
+        "test_rows_matching_train": 400
+      },
+      "unordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2422,
+        "test_rows_matching_train": 400
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "perltqa_zh",
+      "train_rows": 2425,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2425,
+        "test_rows_matching_train": 400
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2425,
+        "test_rows_matching_train": 400
+      },
+      "unordered_history": {
+        "shared_distinct": 1,
+        "train_rows_matching_test": 2425,
+        "test_rows_matching_train": 400
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "personamem_128k",
+      "train_rows": 1875,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 60,
+        "train_rows_matching_test": 1567,
+        "test_rows_matching_train": 333
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 60,
+        "train_rows_matching_test": 1567,
+        "test_rows_matching_train": 333
+      },
+      "unordered_history": {
+        "shared_distinct": 60,
+        "train_rows_matching_test": 1567,
+        "test_rows_matching_train": 333
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "personamem_32k",
+      "train_rows": 77,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 28,
+        "train_rows_matching_test": 58,
+        "test_rows_matching_train": 193
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 28,
+        "train_rows_matching_test": 58,
+        "test_rows_matching_train": 193
+      },
+      "unordered_history": {
+        "shared_distinct": 24,
+        "train_rows_matching_test": 58,
+        "test_rows_matching_train": 193
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "personamem_v2_128k",
+      "train_rows": 2983,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 253,
+        "train_rows_matching_test": 723,
+        "test_rows_matching_train": 296
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 253,
+        "train_rows_matching_test": 723,
+        "test_rows_matching_train": 296
+      },
+      "unordered_history": {
+        "shared_distinct": 253,
+        "train_rows_matching_test": 723,
+        "test_rows_matching_train": 296
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "split_longmemeval_m",
+      "train_rows": 340,
+      "test_rows": 150,
+      "ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "unordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "split_longmemeval_s",
+      "train_rows": 340,
+      "test_rows": 150,
+      "ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "unordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "source": "zh4o",
+      "train_rows": 658,
+      "test_rows": 400,
+      "ordered_history": {
+        "shared_distinct": 28,
+        "train_rows_matching_test": 658,
+        "test_rows_matching_train": 400
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 28,
+        "train_rows_matching_test": 658,
+        "test_rows_matching_train": 400
+      },
+      "unordered_history": {
+        "shared_distinct": 28,
+        "train_rows_matching_test": 658,
+        "test_rows_matching_train": 400
+      },
+      "exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    }
+  ],
+  "all_sources_combined": {
+    "train_rows": 12244,
+    "test_rows": 3100,
+    "ordered_history": {
+      "shared_distinct": 381,
+      "train_rows_matching_test": 8977,
+      "test_rows_matching_train": 2422
+    },
+    "dated_ordered_history": {
+      "shared_distinct": 381,
+      "train_rows_matching_test": 8977,
+      "test_rows_matching_train": 2422
+    },
+    "unordered_history": {
+      "shared_distinct": 377,
+      "train_rows_matching_test": 8977,
+      "test_rows_matching_train": 2422
+    },
+    "exact_query": {
+      "shared_distinct": 47,
+      "train_rows_matching_test": 79,
+      "test_rows_matching_train": 58
+    },
+    "ordered_history_and_exact_query": {
+      "shared_distinct": 0,
+      "train_rows_matching_test": 0,
+      "test_rows_matching_train": 0
+    }
+  },
+  "cross_source_nonzero_pairs": [
+    {
+      "train_source": "personamem_128k",
+      "test_source": "personamem_32k",
+      "ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "unordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "exact_query": {
+        "shared_distinct": 40,
+        "train_rows_matching_test": 71,
+        "test_rows_matching_train": 51
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    },
+    {
+      "train_source": "personamem_32k",
+      "test_source": "personamem_128k",
+      "ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "dated_ordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "unordered_history": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      },
+      "exact_query": {
+        "shared_distinct": 7,
+        "train_rows_matching_test": 8,
+        "test_rows_matching_train": 7
+      },
+      "ordered_history_and_exact_query": {
+        "shared_distinct": 0,
+        "train_rows_matching_test": 0,
+        "test_rows_matching_train": 0
+      }
+    }
+  ]
+}
