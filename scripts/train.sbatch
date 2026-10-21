@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:a100-pcie-40gb:3
 #SBATCH --mem=120G
-#SBATCH --time=72:00:00
+#SBATCH --time=60:00:00
 #SBATCH --output=agmem-train-%j.out
 #SBATCH --error=agmem-train-%j.err
 

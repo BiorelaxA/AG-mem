@@ -298,3 +298,85 @@ CUDA_VISIBLE_DEVICES=0 python -m agmem train
 默认配置已经使用你提供的模型路径，无须修改 `reader.device: cuda:0`；训练进程只看得到物理 GPU 0。
 
 **需要实测的是单张 40GB 的训练显存。** 当前已有 CPU 优化器卸载和梯度检查点，但长上下文仍可能超显存，建议主机内存至少 128GB。上面的命令尚未在三张 40GB 卡上验证。27B 的 `65536` 上下文与当前配置一致；如果启动时提示 KV cache 容量不足而需要调小它，也要同步修改配置中的 `task_agent.max_context_tokens`。
+
+
+
+
+**是的，如果在另一台机器上重新构建目录并开始训练，数据只需要上传 `./data/processed/` 中当前使用的完整版本目录。** 原始数据、旧审计和 smoke 产物都不需要迁移；模型需要另外准备。
+
+我核对了代码，当前读取的是：
+
+```
+data/processed/query_dedup_val10_seed42_20261018/
+```
+
+该目录约 **2\.02 GB（1.89 GiB）**&#65292;包含 9 个来源的 **27 个 Parquet 文件**，以及划分清单和校验信息。
+
+| 内容 | 放在哪里 |
+|---|---|
+| `agmem/`、`configs/`、`scripts/`、`tests/`、`doc/`、依赖文件 | GitHub |
+| 完整的 processed 数据版本目录 | Hugging Face Dataset 仓库 |
+| Qwen3.5-4B、Qwen3.5-27B 完整模型目录 | 目标机器另行准备 |
+| `runs/`、prepared 历史与目录、checkpoint | 从头训练不需要；复用目录或恢复训练时另行迁移 |
+
+**代码上传 GitHub。** 当前 .gitignore 已排除 Parquet、prepared 数据、运行结果和模型权重，同时保留 processed 中的小型清单，适合这种分开存储的方式。
+
+当前工作区的 `git status` 返回“不是 Git 仓库”。如果你准备新建一个空 GitHub 仓库，可以在项目根目录执行，替换用户名：
+
+```
+git init -b main
+git add .gitignore README.md agmem configs scripts tests doc \
+  pyproject.toml environment.yml requirements*.txt data/processed
+
+git diff --cached --stat
+git commit -m "Add AG-Mem training code and dataset manifests"
+
+git remote add origin git@github.com:你的用户名/AG-Mem.git
+git push -u origin main
+```
+
+**数据上传 Hugging Face。** 先创建一个 Dataset 仓库，例如 `你的用户名/agmem-data`。下面将整个 `data/processed` 上传到仓库根目录，保留版本目录名；请把清单和 Parquet 一起上传，`prepare` 会用 `manifest.json` 校验文件 SHA-256。上传、登录和指定下载目录的命令已核对 [Hugging Face 官方 CLI 文档](<https://huggingface.co/docs/huggingface_hub/guides/cli>)。
+
+```
+# 如果尚未安装 hf CLI
+python -m pip install -U huggingface_hub
+
+hf auth login
+
+hf upload 你的用户名/agmem-data \
+  ./data/processed \
+  . \
+  --repo-type dataset
+```
+
+Hugging Face 上的目录结构将是：
+
+```
+query_dedup_val10_seed42_20261018/
+├── manifest.json
+├── train_manifest.jsonl
+├── validation_manifest.jsonl
+├── locomo/
+│   ├── train.parquet
+│   ├── validation.parquet
+│   └── test.parquet
+├── perltqa_en/
+└── ...
+```
+
+**另一台机器下载时**，先克隆代码，再把数据下载回原来的相对路径：
+
+```
+git clone git@github.com:你的用户名/AG-Mem.git
+cd AG-Mem
+
+# 在安装了 hf CLI 的环境中执行
+hf auth login
+hf download 你的用户名/agmem-data \
+  --repo-type dataset \
+  --local-dir ./data/processed
+```
+
+随后按 环境安装说明 (doc/environment\_setup.md) 创建环境，并准备两个完整模型目录。
+
+如果继续使用 `scripts/train.sbatch`，需要核对目标机器的 **模型路径、conda 路径及 Slurm 资源名称**。该脚本读取 `configs/full.yaml`，继承 `configs/default.yaml`，**不会自动读取 `configs/local.yaml`**&#65307;目标机器的模型路径可以覆盖写在 `configs/full.yaml` 中。首次提交后，脚本会重新执行 `prepare → build-directories → train`。
