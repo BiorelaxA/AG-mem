@@ -2,7 +2,11 @@
 
 日期：2026-10-20。此版本按用户确认加入格式惩罚，替代此前仅 outcome + cost 的奖励设计。
 
-## 奖励公式
+2026-10-22 更新：`stop=true` 时忽略 ids 字符串列表中的内容，直接停止，不读取、不增加成本，不因非空、重复、未知或超过 10 个 ID 判格式失败。字段及类型校验保留，原始输出和解析动作中的 IDs 原样记录。此前步骤的格式惩罚不会被清除。
+
+2026-10-24 更新：当前默认采用 `2*F1-1-0.01*F1*read_calls-0.1*format_failure`。以下保留旧版本公式和案例以便解释历史日志；当前字段及兼容规则以 [奖励与 checkpoint 更新](reward_outcome_gated_20261024.md) 为准，格式合法性规则保持一致。
+
+## 历史奖励公式
 
 ```text
 reward = outcome_f1 - 0.01 * read_calls - format_penalty * format_failure
@@ -20,7 +24,7 @@ format_penalty = 0.1
 | 单一合法 JSON，只有 ids/stop，类型正确 | 否 | 依动作执行 |
 | 合法停止：`{"ids":[],"stop":true}` | 否 | 不读取，成本不增加 |
 | JSON 语法错误、额外/缺少字段、错误字段类型 | 是 | Reader 标记 protocol_failure 并终止，不提交本次读取 |
-| `stop=true` 且 ids 非空 | 是 | 同上，不猜测“先读再停”或自动修复 |
+| `stop=true` 且 ids 非空（字符串数组） | 否 | 忽略列表内容，立即停止，不执行读取、不新增成本 |
 | `stop=false`，空批次、超过 10 个或同批重复 ID | 是 | 工具整批拒绝，仍计一次检索成本，保留结构化错误反馈 |
 | 未知/越权 ID | 否 | 工具拒绝，计一次检索成本 |
 | 跨调用重复 ID | 否 | 本次调用仍计成本，证据按 ID 去重 |
@@ -58,9 +62,9 @@ reward:
 
 已完成运行的原始 group、reward、advantage、TensorBoard 和 checkpoint 不回写。`export-rollouts` 只复制已记录字段，不对历史轨迹重新评分。恢复训练会检查 reward 配置，不能把新增惩罚配置静默接到旧奖励实验上；切换目标应使用新的输出目录。仅改变 reward 无需重做 prepare 或 Writer 目录。
 
-## 本次 smoke 的离线示例
+## 历史 smoke 的离线示例（2026-10-20 旧规则）
 
-对 `slurm_smoke_180646` 已保存的轨迹进行假设计算，非回写或重新训练：
+以下保留 2026-10-20 的假设计算，不代表当前停止协议；其中 rollout 3 的非空 ids 停止动作按新规则合法。原始日志不回写：
 
 | rollout | 原 reward | format_failure | 新 reward |
 |---|---:|---:|---:|

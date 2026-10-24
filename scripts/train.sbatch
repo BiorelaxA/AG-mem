@@ -13,6 +13,10 @@
 #   sbatch scripts/train.sbatch
 # If required by the cluster, add --partition=NAME and --account=NAME.
 # The GRES type must match sinfo; override --gres on submission if needed.
+# Parse the complete runtime body before starting any long-running command.
+# Keep the final exit inside the function so Bash never resumes reading a source
+# file that may have been edited while this invocation was running.
+agmem_main() {
 set -Eeuo pipefail
 
 if [[ -z ${SLURM_JOB_ID:-} ]]; then
@@ -99,8 +103,19 @@ path = run_dir / "config.yaml"
 requested_port = os.environ.get("AGMEM_SERVICE_PORT")
 if path.exists():
     config = load_config(path)
-    if requested_port and config["service"]["base_url"] != f"http://127.0.0.1:{int(requested_port)}/v1":
-        raise SystemExit("Service port differs from saved config; reuse its port or select a new AGMEM_RUN_DIR")
+    if requested_port:
+        port = int(requested_port)
+        assert 1 <= port <= 65535
+        requested_url = f"http://127.0.0.1:{port}/v1"
+        if config["service"]["base_url"] != requested_url:
+            if any(Path(config[section][key]).exists() for section, key in
+                   (("data", "prepared_root"), ("training", "output_dir"))):
+                raise SystemExit("Service port differs from saved config and artifacts exist; free the saved port or select a new AGMEM_RUN_DIR")
+            config["service"]["base_url"] = requested_url
+            temporary = path.with_suffix(".yaml.tmp")
+            temporary.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
+            temporary.replace(path)
+            print(f"Updated service port to {port}; no prepared/training artifacts exist")
     print(f"Reusing frozen configuration: {path}")
 else:
     port = int(requested_port or 8000)
@@ -119,8 +134,19 @@ assert config["training"]["output_dir"] == str(run_dir / "train"), "Training out
 PYCONFIG
 
 if [[ -f $RUN_DIR/train.complete ]]; then
-    echo "Full training already completed: $RUN_DIR/train.complete"
-    exit 0
+    PENDING_COUNT=$(python - "$RUN_DIR/prepared/manifest.json" <<'PYPENDING'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+print(json.loads(path.read_text()).get("directory_empty_pending", 0) if path.exists() else 0)
+PYPENDING
+)
+    if [[ $PENDING_COUNT -eq 0 ]]; then
+        echo "Full training already completed: $RUN_DIR/train.complete"
+        exit 0
+    fi
+    echo "Training already completed; retrying $PENDING_COUNT pending empty Writer entries"
 fi
 
 # Fail before loading the 27B model if CUDA or required dependencies are missing.
@@ -147,20 +173,48 @@ print(f"Sources={config['data']['sources']}; splits={config['data']['splits']}")
 print(f"Epochs={config['training']['epochs']}; no sample/group limit")
 PYPREFLIGHT
 
-# A busy port must fail instead of accepting another job's /health response.
+# Before any artifacts exist, a busy default port can be replaced safely.
+# Once data/directory/training outputs exist, preserve the URL used in provenance.
 SERVICE_PORT=$(python - "$CONFIG_PATH" <<'PYPORT'
+import errno
+import os
+from pathlib import Path
 import socket
 import sys
 from urllib.parse import urlsplit
+import yaml
 from agmem.core import load_config
 
-url = urlsplit(load_config(sys.argv[1])["service"]["base_url"])
+path = Path(sys.argv[1])
+config = load_config(path)
+url = urlsplit(config["service"]["base_url"])
 assert url.hostname == "127.0.0.1" and url.port is not None
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", url.port))
-print(url.port)
+port = url.port
+try:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", port))
+except OSError as exc:
+    if exc.errno != errno.EADDRINUSE:
+        raise
+    artifacts_exist = any(Path(config[section][key]).exists() for section, key in
+                          (("data", "prepared_root"), ("training", "output_dir")))
+    if artifacts_exist or os.environ.get("AGMEM_SERVICE_PORT"):
+        raise SystemExit(f"Service port {port} is occupied. Free that port or use a new AGMEM_RUN_DIR with an available AGMEM_SERVICE_PORT. Existing cache/checkpoint provenance will not be changed.") from None
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    config["service"]["base_url"] = f"http://127.0.0.1:{port}/v1"
+    temporary = path.with_suffix(".yaml.tmp")
+    temporary.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
+    temporary.replace(path)
+    print(f"Port {url.port} is occupied; selected port {port} and saved it to {path} (no prepared/training artifacts exist)", file=sys.stderr)
+print(port)
 PYPORT
 )
+# Per-attempt scheduling only: retain the frozen Writer identity and checkpoint config.
+SERVICE_MAX_SEQS=$(python -m agmem.execution "$CONFIG_PATH" "$JOB_DIR/config.yaml")
+CONFIG_PATH="$JOB_DIR/config.yaml"
+echo "Execution config: $CONFIG_PATH; vLLM max-num-seqs=$SERVICE_MAX_SEQS"
 TASK_MODEL=$(python - "$CONFIG_PATH" <<'PY'
 import sys
 from agmem.core import load_config
@@ -175,7 +229,7 @@ setsid env CUDA_VISIBLE_DEVICES="$SERVICE_GPUS" vllm serve "$TASK_MODEL" \
     --dtype bfloat16 \
     --tensor-parallel-size 2 \
     --max-model-len 65536 \
-    --max-num-seqs 1 \
+    --max-num-seqs "$SERVICE_MAX_SEQS" \
     --gpu-memory-utilization 0.90 \
     --language-model-only \
     > "$JOB_DIR/vllm.log" 2>&1 &
@@ -225,6 +279,11 @@ echo "[$(date -Is)] Building all session directories (reuse completed Writer cac
 python -u -m agmem --config "$CONFIG_PATH" build-directories \
     > "$JOB_DIR/directories.log" 2>&1
 
+if [[ -f $RUN_DIR/train.complete ]]; then
+    echo "[$(date -Is)] Directory repair pass finished; training was already complete. See $JOB_DIR/directories.log for remaining empty_pending count."
+    exit 0
+fi
+
 # Only atomically completed checkpoints can be resumed. Preserve unfinished
 # saves/logs in this attempt's directory, so retries cannot collide with .building.
 RESUME_PATH=$(python - "$RUN_DIR" "$JOB_DIR" <<'PYRESUME'
@@ -265,3 +324,8 @@ echo "[$(date -Is)] Full training completed successfully"
 echo "Training log: $JOB_DIR/train.log"
 echo "TensorBoard events: $RUN_DIR/train/tensorboard"
 echo "View with: tensorboard --logdir '$RUN_DIR/train/tensorboard' --host 127.0.0.1 --port 6006"
+
+exit 0
+}
+
+agmem_main "$@"

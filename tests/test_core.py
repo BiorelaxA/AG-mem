@@ -33,7 +33,7 @@ class Writer:
         self.calls = []
     def complete(self, messages, max_tokens, cache_scope=None):
         self.calls.append(messages)
-        return json.dumps({"content": "A factual session summary"})
+        return "A factual session summary"
 
 
 class ScriptedPolicy:
@@ -54,7 +54,7 @@ class CoreTests(unittest.TestCase):
         self.records = clean_history(sample_history())
         self.memory_id = self.store.add_memory(self.records)
         self.writer = Writer()
-        self.config = {"lookback_sessions": 5, "content_max_tokens": 96, "max_output_tokens": 192, "format_retries": 0}
+        self.config = {"lookback_sessions": 3, "content_max_tokens": 300}
         self.builder = DirectoryBuilder(self.store, self.writer, self.config, Tokenizer())
         self.directory = self.builder.build(self.memory_id)
         self.example = Example("fixture/train/0", "fixture", "train", self.memory_id, "Which event?", gold_answers=["SECRET_GOLD"])
@@ -82,7 +82,7 @@ class CoreTests(unittest.TestCase):
 
     def test_writer_window_and_complete_history_reuse(self):
         value = json.loads(self.writer.calls[6][1]["content"])
-        self.assertEqual([row["order"] for row in value["PRECEDING_CONTEXT"]], [1, 2, 3, 4, 5])
+        self.assertEqual([row["order"] for row in value["PRECEDING_CONTEXT"]], [3, 4, 5])
         self.assertEqual(value["TARGET_SESSION"]["order"], 6)
         first = json.loads(self.writer.calls[0][1]["content"])
         self.assertEqual(first["PRECEDING_CONTEXT"], [])
@@ -127,7 +127,7 @@ class CoreTests(unittest.TestCase):
     def test_fenced_json_still_rejects_invalid_actions_and_surrounding_prose(self):
         action = '{"ids":[],"stop":true}'
         invalid = [
-            '```json\n{"ids":["x"],"stop":true}\n```',
+            '```json\n{"ids":"x","stop":true}\n```',
             '```json\n{"ids":[],"stop":"true"}\n```',
             '```json\n{"ids":[],"stop":true,"extra":1}\n```',
             'Here is the action:\n```json\n' + action + '\n```',
@@ -175,7 +175,7 @@ class CoreTests(unittest.TestCase):
         read = {"ids": [key], "stop": False}
         row = env.run(self.example, ScriptedPolicy([read, read]), 0)
         self.assertEqual((row.termination_reason, row.n_read_calls), ("max_read_calls", 1))
-        row = env.run(self.example, ScriptedPolicy(['{"ids":["x"],"stop":true}']), 0)
+        row = env.run(self.example, ScriptedPolicy(['{"ids":["x"],"stop":"true"}']), 0)
         self.assertEqual(row.termination_reason, "protocol_failure")
         self.assertEqual(row.n_read_calls, 0)
 
@@ -203,7 +203,6 @@ class CoreTests(unittest.TestCase):
             ('{"ids":[],["stop":false}', 0),
             ({"ids": [], "stop": "true"}, 0),
             ({"ids": [], "stop": True, "extra": 1}, 0),
-            ({"ids": [key], "stop": True}, 0),
             ({"ids": [], "stop": False}, 1),
             ({"ids": [key] * 11, "stop": False}, 1),
             ({"ids": [key, key], "stop": False}, 1),
@@ -232,6 +231,33 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(row.termination_reason, "max_read_calls")
         self.assertIsNone(row.decisions[-1].tool_result)
         self.assertEqual(row.read_cost, 0.01)
+        self.assertEqual(row.format_reward, -0.1)
+
+    def test_stop_ignores_nonempty_ids_without_reading_or_format_penalty(self):
+        key = self.directory[0]["id"]
+        config = {"reward": {"read_call_cost": 0.01, "format_penalty": 0.1}}
+        agent = SimpleNamespace(answer=lambda example, evidence: ("SECRET_GOLD", "hash"))
+        env = MemoryEnvironment(self.store, self.builder.version, max_calls=1)
+        for ids in ([], [key], ["unknown"], [key] * 11):
+            for read_first in (False, True):
+                with self.subTest(ids=ids, read_first=read_first):
+                    stop = '```json\n' + json.dumps({"ids": ids, "stop": True}) + '\n```'
+                    actions = ([{"ids": [key], "stop": False}] if read_first else []) + [stop]
+                    row = scored_rollout(config, env, ScriptedPolicy(actions), agent, self.example, 42)
+                    self.assertEqual(row.termination_reason, "stop")
+                    self.assertFalse(row.format_failure)
+                    self.assertEqual(row.format_reward, 0)
+                    self.assertEqual(row.n_read_calls, int(read_first))
+                    self.assertEqual(len(row.evidence), int(read_first))
+                    self.assertAlmostEqual(row.reward, 1 - 0.01 * int(read_first))
+                    self.assertEqual(row.decisions[-1].completion.text, stop)
+                    self.assertEqual(row.decisions[-1].action, {"ids": ids, "stop": True})
+                    self.assertIsNone(row.decisions[-1].tool_result)
+        # A valid stop must not erase a previous invalid retrieval batch.
+        row = scored_rollout(config, env, ScriptedPolicy([
+            {"ids": [], "stop": False}, {"ids": [key], "stop": True}
+        ]), agent, self.example, 42)
+        self.assertEqual(row.termination_reason, "stop")
         self.assertEqual(row.format_reward, -0.1)
 
     def test_valid_actions_unknown_ids_and_capacity_do_not_get_format_penalties(self):

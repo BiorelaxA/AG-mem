@@ -15,6 +15,9 @@ class WordTokenizer:
     def encode(self, text, **kwargs):
         return text.split()
 
+    def decode(self, ids, **kwargs):
+        return " ".join(ids)
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
@@ -53,73 +56,151 @@ class ServiceTests(unittest.TestCase):
                 service.complete([{"role": "user", "content": "q"}], 10)
         self.assertEqual(len(self.store.completions.keys()), 0)
 
-    def writer_fixture(self, responses, format_retries=2):
+    def writer_fixture(self, responses):
         requests = []
         responses = iter(responses)
         def respond(request):
             requests.append(json.loads(request.content))
-            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": next(responses)}}]})
+            response = next(responses)
+            payload = response if isinstance(response, dict) else {
+                "choices": [{"finish_reason": "stop", "message": {"content": response}}]}
+            return httpx.Response(200, json=payload)
         service = ChatService(self.config, self.store, "writer")
         service.client.close()
         service.client = httpx.Client(transport=httpx.MockTransport(respond))
         self.addCleanup(service.client.close)
-        config = {"lookback_sessions": 5, "content_max_tokens": 200, "max_output_tokens": 384,
-                  "format_retries": format_retries}
+        config = {"lookback_sessions": 3, "content_max_tokens": 300}
         memory_id = self.store.add_memory(clean_history({
-            "haystack_sessions": [[{"role": "user", "content": "Alice moved to Paris in 2023."}]],
+            "haystack_sessions": [[{"role": "user", "name": "Alice", "content": "Alice moved to Paris in 2023."}]],
             "haystack_session_ids": ["session0"],
         }))
         return DirectoryBuilder(self.store, service, config, WordTokenizer()), memory_id, requests
 
-    def test_writer_repairs_overlength_summary_and_reuses_valid_cache(self):
-        oversized = json.dumps({"content": " ".join(["detail"] * 201)})
-        valid_content = " ".join(["fact"] * 200)
-        builder, memory_id, requests = self.writer_fixture([oversized, json.dumps({"content": valid_content})])
+    def test_writer_plain_content_and_program_generated_metadata(self):
+        summary = 'Alice said "hello"; moved to Paris in 2023.\nPrefers walking.'
+        builder, memory_id, requests = self.writer_fixture([summary])
         entries = builder.build(memory_id)
-        self.assertEqual(entries[0]["content"], valid_content)
-        self.assertEqual(len(requests), 2)
-        self.assertIn("at most 200 tokens", requests[0]["messages"][0]["content"])
-        self.assertEqual(requests[0]["max_tokens"], 384)
-        self.assertEqual(requests[1]["messages"][-2], {"role": "assistant", "content": oversized})
-        self.assertIn("201 tokens", requests[1]["messages"][-1]["content"])
-        self.assertIn("content_max_tokens=200", requests[1]["messages"][-1]["content"])
-        self.assertIn("Shorten the summary", requests[1]["messages"][-1]["content"])
-        self.assertEqual(self.store.directory_entry(memory_id, builder.version, entries[0]["id"])["content"], valid_content)
+        self.assertEqual(entries[0]["content"], summary)
+        self.assertEqual(entries[0]["task_session"]["session_id"], "session0")
+        self.assertEqual(entries[0]["time_order"]["order"], 0)
+        self.assertEqual(entries[0]["actors_source"]["actors"], ["Alice"])
+        self.assertEqual(requests[0]["max_tokens"], 300)
+        prompt = requests[0]["messages"][0]["content"]
+        self.assertIn("nonempty plain text", prompt)
+        self.assertIn("at most 300 tokens", prompt)
+        self.assertIn("Every summarized fact must be supported by TARGET_SESSION", prompt)
+        saved = json.loads((self.store.root / "directories.jsonl").read_text())
+        self.assertEqual(saved["content"], summary)
+        self.assertEqual(saved["memory_id"], memory_id)
         self.assertEqual(builder.build(memory_id), entries)
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 1)
 
-    def test_writer_reports_exhausted_length_budget_without_publishing_directory(self):
-        oversized = json.dumps({"content": " ".join(["detail"] * 201)})
-        builder, memory_id, requests = self.writer_fixture([oversized] * 3)
-        with self.assertRaisesRegex(ValueError, "after 3 attempts: Summary contains 201 tokens; content_max_tokens=200"):
-            builder.build(memory_id)
+    def test_writer_accepts_length_without_retry_and_caches_response(self):
+        summary = " ".join(f"fact{i}" for i in range(300))
+        response = {"choices": [{"finish_reason": "length", "message": {"content": summary}}],
+                    "usage": {"prompt_tokens": 28060, "completion_tokens": 300}}
+        builder, memory_id, requests = self.writer_fixture([response])
+        builder.service.config = {**builder.service.config, "retries": 2}
+        self.assertEqual(builder.build(memory_id)[0]["content"], summary)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(self.store.completions.keys()), 1)
+        self.assertFalse((self.store.root / "service_failures.jsonl").exists())
+        # Completion cache reuse also accepts the formerly truncated response.
+        self.assertEqual(builder.service.complete(requests[0]["messages"], 300,
+            cache_scope=f"{memory_id}/{builder.version}"), summary)
+        self.assertEqual(len(requests), 1)
+
+    def test_writer_overlong_response_is_cut_at_token_boundary_without_retry(self):
+        summary = " ".join(f"fact{i}" for i in range(320))
+        builder, memory_id, requests = self.writer_fixture([summary])
+        entries = builder.build(memory_id)
+        self.assertEqual(entries[0]["content"], " ".join(f"fact{i}" for i in range(300)))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["max_tokens"], 300)
+        self.assertEqual(builder.build(memory_id), entries)
+        self.assertEqual(len(requests), 1)
+
+    def test_writer_empty_response_is_saved_pending_once_and_is_logged(self):
+        for index, empty in enumerate((None, "", "   ")):
+            response = {"choices": [{"finish_reason": "length", "message": {
+                "content": empty, "reasoning_content": "Reasoning only"}}]}
+            builder, memory_id, requests = self.writer_fixture([response])
+            builder.service.config = {**builder.service.config, "retries": 2}
+            entries = builder.build(memory_id)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(entries[0]["content"], "")
+            self.assertEqual(entries[0]["writer_status"], "empty_pending")
+            self.assertEqual(self.store.directory(memory_id, builder.version), entries)
+            self.assertEqual(len(self.store.directory_entries.keys()), 1)
+            self.assertEqual(len(self.store.completions.keys()), 0)
+            failures = (self.store.root / "service_failures.jsonl").read_text().splitlines()
+            self.assertEqual(len(failures), index + 1)
+            self.assertEqual(json.loads(failures[-1])["response"], response)
+
+    def test_writer_continues_after_empty_and_only_retries_pending_after_reopen(self):
+        empty = {"choices": [{"finish_reason": "stop", "message": {"content": None}}]}
+        builder, _, requests = self.writer_fixture([empty, "Second summary.", "Third summary."])
+        memory_id = self.store.add_memory(clean_history({
+            "haystack_sessions": [[{"role": "user", "content": text}] for text in ("first", "second", "third")],
+            "haystack_session_ids": ["session0", "session1", "session2"],
+        }))
+        entries = builder.build(memory_id)
         self.assertEqual(len(requests), 3)
-        for request in requests[1:]:
-            self.assertIn("content limit is 200 tokens", request["messages"][-1]["content"])
-            self.assertNotIn("aim for", request["messages"][-1]["content"])
-        self.assertEqual(len(self.store.directory_entries.keys()), 0)
-        with self.assertRaisesRegex(ValueError, "Directory missing"):
-            self.store.directory(memory_id, builder.version)
+        self.assertEqual([entry["content"] for entry in entries], ["", "Second summary.", "Third summary."])
+        self.assertEqual(entries[0]["writer_status"], "empty_pending")
+        self.store.close()
+        self.store = Store(self.store.root)
+        self.assertEqual(self.store.directory(memory_id, builder.version)[0]["writer_status"], "empty_pending")
+        retried = []
+        def respond(request):
+            retried.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "First summary."}}]})
+        service = ChatService(self.config, self.store, "writer")
+        service.client.close()
+        service.client = httpx.Client(transport=httpx.MockTransport(respond))
+        self.addCleanup(service.client.close)
+        resumed = DirectoryBuilder(self.store, service, builder.config, WordTokenizer())
+        completed = resumed.build(memory_id)
+        self.assertEqual(resumed.version, builder.version)
+        self.assertEqual(len(retried), 1)
+        self.assertEqual(json.loads(retried[0]["messages"][1]["content"])["TARGET_SESSION"]["order"], 0)
+        self.assertEqual([entry["content"] for entry in completed], ["First summary.", "Second summary.", "Third summary."])
+        self.assertTrue(all("writer_status" not in entry for entry in completed))
+        self.assertEqual(self.store.directory(memory_id, builder.version), completed)
+        self.assertEqual(resumed.build(memory_id), completed)
+        self.assertEqual(len(retried), 1)
+        # Filling a placeholder also invalidates any in-memory directory cache.
+        self.store.close()
+        self.store = Store(self.store.root)
+        self.assertEqual(self.store.directory(memory_id, builder.version), completed)
 
-    def test_writer_repairs_invalid_json_schema(self):
-        invalid = ["not JSON", "[]", '{"content": "fact", "extra": true}', '{"content": 3}',
-                   '{"content": "  "}', '```json\n{"content": "fact"}\n```']
-        builder, memory_id, requests = self.writer_fixture(
-            invalid + ['{"content": "Alice moved to Paris in 2023."}'], format_retries=len(invalid))
-        self.assertEqual(builder.build(memory_id)[0]["content"], "Alice moved to Paris in 2023.")
-        self.assertEqual(len(requests), len(invalid) + 1)
-        for index, response in enumerate(invalid):
-            self.assertEqual(requests[index + 1]["messages"][-2]["content"], response)
-            feedback = requests[index + 1]["messages"][-1]["content"]
-            self.assertIn("Repair the JSON format", feedback)
-            self.assertNotIn("Shorten the summary", feedback)
+    def test_only_pending_content_can_be_replaced_and_source_metadata_stays_fixed(self):
+        empty = {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]}
+        builder, memory_id, _ = self.writer_fixture([empty])
+        pending = builder.build(memory_id)[0]
+        altered = {**pending, "actors_source": {"actors": ["Somebody else"], "sources": []}}
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.store.put_directory_entry(memory_id, builder.version, altered)
+        completed = {key: value for key, value in pending.items() if key != "writer_status"}
+        completed["content"] = "Recovered summary."
+        self.store.put_directory(memory_id, builder.version, [completed])
+        self.assertEqual(self.store.directory(memory_id, builder.version), [completed])
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.store.put_directory_entry(memory_id, builder.version, {**completed, "content": "Changed summary."})
+
+    def test_writer_does_not_parse_json_or_retry_for_text_format(self):
+        # The service body is content verbatim. JSON serialization belongs to Store.
+        text = '{"text":"quotes and an unfinished phrase'
+        builder, memory_id, requests = self.writer_fixture([text])
+        self.assertEqual(builder.build(memory_id)[0]["content"], text)
+        self.assertEqual(len(requests), 1)
 
     def test_writer_response_cache_is_scoped_to_complete_history(self):
-        responses = ['{"content": "Alice moved to Paris."}'] * 3
+        responses = ['Alice moved to Paris.'] * 3
         builder, first_id, requests = self.writer_fixture(responses)
         first = builder.build(first_id)
         records = clean_history({
-            "haystack_sessions": [[{"role": "user", "content": "Alice moved to Paris in 2023."}],
+            "haystack_sessions": [[{"role": "user", "name": "Alice", "content": "Alice moved to Paris in 2023."}],
                                   [{"role": "user", "content": "Alice moved to Berlin later."}]],
             "haystack_session_ids": ["session0", "session1"],
         })

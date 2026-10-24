@@ -4,6 +4,7 @@ from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import Path
 import json
+from threading import RLock
 
 from .core import Example, atomic_json, canonical, digest
 
@@ -112,6 +113,7 @@ class Store:
 
     FORMAT = "trajectory_jsonl_v1"
     ENTRY_FIELDS = ("id", "task_session", "actors_source", "time_order", "content")
+    OPTIONAL_ENTRY_FIELDS = ("writer_status",)
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -127,6 +129,7 @@ class Store:
         self.histories = _JsonlFile(self.root / "memory_records.jsonl", ("memory_id",))
         self.directory_entries = _JsonlFile(self.root / "directories.jsonl", ("memory_id", "version", "id"))
         self.completions = _JsonlFile(self.root / "completions.jsonl", ("key",))
+        self._completion_lock = RLock()
         self.example_files = {}
         self._memory_cache = OrderedDict()
         self._directory_cache = OrderedDict()
@@ -195,20 +198,38 @@ class Store:
         return {**reference, "messages": messages, "raw_text": text}
 
     def completion(self, key):
-        row = self.completions.get((key,))
+        with self._completion_lock:
+            row = self.completions.get((key,))
         return row["response"] if row else None
 
     def put_completion(self, key, response):
-        self.completions.put({"key": key, "response": response})
+        with self._completion_lock:
+            self.completions.put({"key": key, "response": response})
 
     def directory_entry(self, memory_id, version, record_id):
         row = self.directory_entries.get((memory_id, version, record_id))
-        return {key: row[key] for key in self.ENTRY_FIELDS} if row else None
+        return self._directory_fields(row) if row else None
+
+    def _directory_fields(self, row):
+        return {**{key: row[key] for key in self.ENTRY_FIELDS},
+                **{key: row[key] for key in self.OPTIONAL_ENTRY_FIELDS if key in row}}
 
     def put_directory_entry(self, memory_id, version, entry):
+        status = entry.get("writer_status")
+        if status is not None and (status != "empty_pending" or entry["content"] != ""):
+            raise ValueError("empty_pending must mark empty content")
         previous = self.directory_entry(memory_id, version, entry["id"])
         if previous is not None and previous != entry:
-            raise ValueError("Directory entries are immutable within a history/version")
+            # Only an explicitly empty placeholder may be filled. Successful
+            # summaries and all source metadata remain immutable in this version.
+            metadata = lambda row: {key: value for key, value in row.items() if key not in {"content", "writer_status"}}
+            pending = previous.get("writer_status") == "empty_pending" and previous["content"] == ""
+            valid_replacement = bool(entry["content"].strip()) or entry.get("writer_status") == "empty_pending"
+            if not pending or not valid_replacement or metadata(previous) != metadata(entry):
+                raise ValueError("Directory entries are immutable within a history/version except pending empty content")
+            self.directory_snapshots.pop(digest([memory_id, version]), None)
+            atomic_json(self.directory_manifest_path, self.directory_snapshots)
+            self._directory_cache.pop((memory_id, version), None)
         self.directory_entries.put({"memory_id": memory_id, "version": version,
                                     "session_id": entry["task_session"]["session_id"],
                                     "order": entry["time_order"]["order"], **entry})
@@ -231,10 +252,67 @@ class Store:
         if state is None:
             raise ValueError(f"Directory missing for {memory_id}, version={version}; run build-directories")
         rows = self.directory_entries.get_many([(memory_id, version, row["id"]) for row in self.memory(memory_id)])
-        entries = [{key: row[key] for key in self.ENTRY_FIELDS} if row else None for row in rows]
+        entries = [self._directory_fields(row) if row else None for row in rows]
         if None in entries or len(entries) != state["count"] or digest(entries) != state["sha256"]:
             raise ValueError(f"Incomplete or changed directory for {memory_id}; run build-directories")
         self._directory_cache[cache_key] = entries
         if len(self._directory_cache) > 2:
             self._directory_cache.popitem(last=False)
         return entries
+
+
+class DatasetStores:
+    """Read selected per-source stores as one training view, retaining split boundaries."""
+
+    FORMAT = Store.FORMAT
+
+    def __init__(self, root, stores):
+        self.root = Path(root)
+        self.stores = stores
+        self.owners = {}
+        for source, store in stores.items():
+            for memory_id in store.memory_ids():
+                self.owners.setdefault(memory_id, []).append(source)
+        # Task-agent responses are cached separately from offline Writer responses.
+        self.runtime = Store(self.root / "_runtime")
+
+    def close(self):
+        for store in self.stores.values():
+            store.close()
+        self.runtime.close()
+
+    def get_metadata(self, key, default=None):
+        if key == "prepare_identity":
+            return {"layout": "by_source", "datasets": {
+                source: store.get_metadata(key) for source, store in self.stores.items()}}
+        values = [store.get_metadata(key, default) for store in self.stores.values()]
+        if key == "directory_empty_pending":
+            return sum(value or 0 for value in values)
+        if not values or any(value != values[0] for value in values):
+            raise ValueError(f"Selected datasets have missing or inconsistent {key}; build all selected directories")
+        return values[0]
+
+    def examples(self, split):
+        return sorted((example for store in self.stores.values() for example in store.examples(split)),
+                      key=lambda example: example.sample_id)
+
+    def memory_ids(self):
+        return sorted(self.owners)
+
+    def _owner(self, memory_id):
+        return self.stores[self.owners[memory_id][0]]
+
+    def memory(self, memory_id):
+        return self._owner(memory_id).memory(memory_id)
+
+    def record(self, reference):
+        return self._owner(reference["memory_id"]).record(reference)
+
+    def directory(self, memory_id, version):
+        return self._owner(memory_id).directory(memory_id, version)
+
+    def completion(self, key):
+        return self.runtime.completion(key)
+
+    def put_completion(self, key, response):
+        self.runtime.put_completion(key, response)

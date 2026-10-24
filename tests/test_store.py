@@ -33,10 +33,10 @@ class Writer:
         if self.fail_after is not None and len(self.calls) >= self.fail_after:
             raise InfrastructureError("fixture interruption")
         self.calls.append((messages, cache_scope))
-        return '{"content":"Recorded facts."}'
+        return "Recorded facts."
 
 
-WRITER_CONFIG = {"lookback_sessions": 5, "content_max_tokens": 96, "max_output_tokens": 192, "format_retries": 0}
+WRITER_CONFIG = {"lookback_sessions": 3, "content_max_tokens": 300}
 
 
 class StoreTests(unittest.TestCase):

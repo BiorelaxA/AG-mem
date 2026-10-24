@@ -67,6 +67,8 @@ class Completion:
     prompt_ids: list[int] = field(default_factory=list)
     token_ids: list[int] = field(default_factory=list)
     old_logprobs: list[float] = field(default_factory=list)
+    sampling_seed: int | None = None
+    sampling_batch_size: int = 1
 
 
 @dataclass
@@ -96,6 +98,8 @@ class Trajectory:
     read_cost: float = 0.0
     format_failure: bool = False
     format_reward: float = 0.0
+    outcome_reward: float = 0.0
+    raw_read_cost: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -128,15 +132,21 @@ def load_config(path: str | Path) -> dict:
     value = read(path, set())
     if not isinstance(value, dict):
         raise ValueError("Configuration must be a mapping")
+    from .execution import execution_settings
+    execution_settings(value)
+    if value.get("data", {}).get("layout", "combined") not in {"combined", "by_source"}:
+        raise ValueError("data.layout must be combined or by_source")
     if value["training"]["group_size"] != 8:
         raise ValueError("This experiment fixes GRPO group_size=8")
     if value["training"]["parameterization"] != "full":
         raise ValueError("Reader must use full parameter training")
-    if value["memory"]["record_unit"] != "session" or value["writer"]["lookback_sessions"] < 5:
-        raise ValueError("Use one entry per session and at least five preceding sessions")
+    if value["memory"]["record_unit"] != "session" or value["writer"]["lookback_sessions"] < 3:
+        raise ValueError("Use one entry per session and at least three preceding sessions")
     if value["retrieval"]["max_ids_per_call"] != 10 or value["reward"]["read_call_cost"] != 0.01:
         raise ValueError("Experiment fixes max_ids_per_call=10 and read_call_cost=0.01")
     penalty = value["reward"].get("format_penalty", 0.0)
+    if value["reward"].get("formula", "outcome_cost_v1") not in {"outcome_cost_v1", "outcome_gated_v2"}:
+        raise ValueError("Unknown reward.formula")
     if isinstance(penalty, bool) or not isinstance(penalty, (int, float)) or not math.isfinite(penalty) or penalty < 0:
         raise ValueError("reward.format_penalty must be finite and nonnegative")
     return value

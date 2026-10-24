@@ -1,4 +1,9 @@
 seed: 42
+execution:
+  writer_workers: 2
+  task_agent_workers: 2
+  reader_batch_size: 2
+  reader_batch_max_tokens: 16384  # Padded prompt + output budget across a Reader batch; long inputs run singly.
 data:
   input_root: data/processed/query_dedup_val10_seed42_20261018
   prepared_root: data/prepared/session_jsonl_v2
@@ -16,10 +21,8 @@ service:
   timeout_seconds: 600
   retries: 2
 writer:
-  lookback_sessions: 5
-  content_max_tokens: 200
-  max_output_tokens: 384
-  format_retries: 2
+  lookback_sessions: 3
+  content_max_tokens: 300  # Writer emits plain content; this is also the generation token limit.
 reader:
   device: cuda:0
   max_context_tokens: null  # Full session directory; no 32k filtering or hierarchy. Native model limit still applies.
@@ -33,6 +36,7 @@ task_agent:
   max_output_tokens: 512
   max_context_tokens: 65536  # Match the actual 27B service --max-model-len.
 reward:
+  formula: outcome_gated_v2  # 2*F1 - 1 - read_call_cost*F1*calls + format_reward.
   read_call_cost: 0.01
   format_penalty: 0.1  # Deduct once per rollout with any Reader format/protocol failure.
   choice_outcome: label_f1
@@ -49,7 +53,7 @@ training:
   kl_coefficient: 0.01
   max_grad_norm: 1.0
   group_infrastructure_retries: 1
-  validation_every: 100
+  validation_every: 50
   checkpoint_every: 100
   keep_last_checkpoints: 2
   tensorboard: true  # Scalars are written to <output_dir>/tensorboard after each update.

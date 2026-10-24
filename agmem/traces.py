@@ -30,7 +30,7 @@ def compact_group(group: dict) -> dict:
                 "outcome_f1": row["outcome"],
                 "reward": row["reward"],
                 # Historical groups keep their recorded reward unchanged.
-                **{key: row[key] for key in ("read_cost", "format_failure", "format_reward") if key in row},
+                **{key: row[key] for key in ("read_cost", "raw_read_cost", "outcome_reward", "format_failure", "format_reward") if key in row},
             }
             for index, row in enumerate(group["rollouts"])
         ],

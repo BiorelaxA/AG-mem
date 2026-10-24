@@ -1,0 +1,49 @@
+[2026-10-22T13:25:37+08:00] job=186753 node=gpu16 output=/home/hongyshen/AG-Mem/runs/locomo_longmemeval logs=/home/hongyshen/AG-Mem/runs/locomo_longmemeval/jobs/186753.wG7f48
+Thu Oct 22 13:25:37 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.159.03             Driver Version: 580.159.03     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-PCIE-40GB          On  |   00000000:1B:00.0 Off |                    0 |
+| N/A   27C    P0             33W /  250W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA A100-PCIE-40GB          On  |   00000000:3E:00.0 Off |                    0 |
+| N/A   27C    P0             32W /  250W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA A100-PCIE-40GB          On  |   00000000:88:00.0 Off |                    0 |
+| N/A   26C    P0             32W /  250W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Reader CUDA_VISIBLE_DEVICES=0; 27B CUDA_VISIBLE_DEVICES=1,2
+Saved full-training configuration: /home/hongyshen/AG-Mem/runs/locomo_longmemeval/config.yaml
+PyTorch=2.10.0+cu129, vLLM=0.19.1
+Sources=['locomo', 'split_longmemeval_s', 'split_longmemeval_m']; splits=['train', 'validation']
+Epochs=1; no sample/group limit
+[2026-10-22T13:26:26+08:00] Starting 27B service on port 50543
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+Waiting for 27B service; startup details are in vllm.log
+27B service is ready
+[2026-10-22T13:31:30+08:00] Preparing LoCoMo and LongMemEval train/validation separately by dataset
+[2026-10-22T13:32:58+08:00] Building selected dataset directories in configuration order (reuse completed entries)

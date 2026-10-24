@@ -17,8 +17,8 @@ def parse_action(text: str) -> dict:
         raise ValueError("Expected exactly ids and stop")
     if type(value["stop"]) is not bool or not isinstance(value["ids"], list) or any(not isinstance(item, str) for item in value["ids"]):
         raise ValueError("Invalid action types")
-    if value["stop"] and value["ids"]:
-        raise ValueError("stop=true requires ids=[]")
+    # A stop action never executes a read. Preserve its IDs for the rollout
+    # audit, but ignore their contents when deciding whether to stop.
     return value
 
 
@@ -28,6 +28,42 @@ class MemoryEnvironment:
         self.max_ids, self.max_calls, self.capacity = max_ids, max_calls, capacity
 
     def run(self, example, policy, seed: int, policy_version=0):
+        episode = self._episode(example, seed, policy_version)
+        messages, decision_seed = next(episode)
+        while True:
+            try:
+                completion = policy.complete(messages, seed=decision_seed)
+            except CapacityError as exc:
+                raise CapacityError(f"{example.sample_id}, decision {decision_seed - seed}: {exc}") from exc
+            try:
+                messages, decision_seed = episode.send(completion)
+            except StopIteration as done:
+                return done.value
+
+    def run_batch(self, example, policy, seeds, policy_version=0, max_batch_tokens=16384):
+        """Advance independent retrieval states together; tools remain ordered per rollout."""
+        episodes = [self._episode(example, seed, policy_version) for seed in seeds]
+        active = {index: next(episode) for index, episode in enumerate(episodes)}
+        results = [None] * len(seeds)
+        while active:
+            indices = list(active)
+            messages = [active[index][0] for index in indices]
+            decision_seeds = [active[index][1] for index in indices]
+            try:
+                completions = policy.complete_batch(messages, decision_seeds, max_batch_tokens=max_batch_tokens)
+            except CapacityError as exc:
+                raise CapacityError(f"{example.sample_id}, batched retrieval: {exc}") from exc
+            if len(completions) != len(indices):
+                raise ValueError("Batched Reader returned the wrong number of completions")
+            for index, completion in zip(indices, completions):
+                try:
+                    active[index] = episodes[index].send(completion)
+                except StopIteration as done:
+                    results[index] = done.value
+                    del active[index]
+        return results
+
+    def _episode(self, example, seed, policy_version):
         directory = self.store.directory(example.memory_id, self.version)
         entries = {row["id"]: row for row in directory}
         references = {row["id"]: row for row in self.store.memory(example.memory_id)}
@@ -37,10 +73,7 @@ class MemoryEnvironment:
         evidence, error = {}, None
         for decision_index in range(self.max_calls + 1):
             messages = reader_messages(example, directory, list(evidence.values()), error)
-            try:
-                completion = policy.complete(messages, seed=seed + decision_index)
-            except CapacityError as exc:
-                raise CapacityError(f"{example.sample_id}, decision {decision_index}: {exc}") from exc
+            completion = yield messages, seed + decision_index
             decision = Decision(messages, completion, state_sha256=digest(messages))
             trajectory.decisions.append(decision)
             try:

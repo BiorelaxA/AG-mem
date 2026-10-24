@@ -1,17 +1,27 @@
 # AG-Mem
 
+新增独立 A100 入口：`scripts/build_directories_all_a100.sbatch` 申请 2 张 A100 40GB 卡，从 LongMemEval-M 开始为除 LoCoMo/S 外的七个来源构建目录；`scripts/train_eval_locomo_s_a100.sbatch` 申请 4 卡，其中两张分层运行 Reader 全参 GRPO，另外两张部署 27B，负责 LoCoMo/S 的目录、训练和测试。两个任务按来源加锁共享缓存，test 使用独立存储。提交与结果路径见 [独立任务说明](doc/independent_a100_jobs.md)。
+
+当前首轮实验仅使用 LoCoMo 与 LongMemEval-S；LongMemEval-M 暂缓构建。`configs/pilot.yaml` 保留三种可选数据源，`configs/pilot_workflow.yaml` 独立选择目录构建和训练来源。支持按数据集独立准备、构建和续跑，训练时汇总选定来源，train 与 validation 保持分开。已有集中存储可以迁移复用摘要。操作与共享历史审计见 [按数据集构建说明](doc/dataset_directory_workflow_20261022.md)。
+
+pilot 脚本支持 `AGMEM_STAGE=build|train|all`（默认 all），默认完成 LoCoMo/S 目录后立即训练这两部分，结果保存到 `runs/locomo_longmemeval/experiments/locomo_s/train/`。后续 M-only 与三来源实验分别使用 `configs/pilot_workflow_m.yaml`、`configs/pilot_workflow_all.yaml`。
+
+已支持 Writer 并发、Reader 小批量 rollout 与 Task Agent 并发评分，默认各为 2；目录缓存可复用，group 仍固定 8 条后统一更新。参数、sbatch 覆盖和串行回退见 [并发执行说明](doc/concurrency_20261023.md)。
+
 目录引导的多步记忆检索与 Reader 全参 GRPO。Reader 使用本地 Qwen3.5-4B；冻结的 Qwen3.5-27B 共用一个服务，分别承担离线 Writer 和 Task Agent。
 
-实现遵循当前约定：每个原始 session 一个目录项；Writer 看到当前 session 和前 5 个原始 session，只概括当前 session。Reader 每次选择 1–10 个 ID，读取整份 session 原文，最多 8 次调用并自主停止。一个 GRPO group 对同一问题采样 8 条完整轨迹。
+实现遵循当前约定：每个原始 session 一个目录项；Writer 看到当前 session 和前 3 个原始 session，只概括当前 session。Reader 每次选择 1–10 个 ID，读取整份 session 原文，最多 8 次调用并自主停止。一个 GRPO group 对同一问题采样 8 条完整轨迹。
 
 ```text
-reward = outcome_f1 - 0.01 * logical_read_calls - 0.1 * format_failure
+reward = 2 * outcome_f1 - 1 - 0.01 * outcome_f1 * logical_read_calls - 0.1 * format_failure
 choice outcome: option-label F1, correct=1 / wrong or invalid=0
 open QA outcome: deterministic answer-text F1
 format_failure: 1 if any Reader format/protocol failure occurs, otherwise 0
 ```
 
-每条完整 rollout 最多扣一次格式惩罚，合法动作不加格式分。JSON/schema 错误、`stop=true` 但 IDs 非空，以及继续检索时空批次、超过 10 个或同批重复 ID，均计格式失败；未知 ID、跨批重复与容量拒绝保持原有成本处理。系数由 `reward.format_penalty` 配置，默认 0.1（smoke 继承），设为 0 可消融。训练和评估共用评分；历史日志不会重新计分。详细边界见 [格式奖励设计](doc/format_reward_20261020.md)。
+每条完整 rollout 最多扣一次格式惩罚，合法动作不加格式分。JSON/schema 错误，以及继续检索时空批次、超过 10 个或同批重复 ID，均计格式失败；未知 ID、跨批重复与容量拒绝保持原有成本处理。`stop=true` 时忽略 ids 列表内容，直接停止，不新增读取成本或格式惩罚；JSON 字段及类型仍须合法。系数由 `reward.format_penalty` 配置，默认 0.1（smoke 继承），设为 0 可消融。训练和评估共用评分；历史日志不会重新计分。详细边界见 [格式奖励设计](doc/format_reward_20261020.md)。
+
+默认启用 `reward.formula: outcome_gated_v2`；F1=0 时不扣检索成本。`read_cost` 是 F1 加权后的实际扣款，`raw_read_cost` 保留未加权成本。保留最近两个 checkpoint，并保护固定验证集宏平均 reward/F1 各自最佳的 checkpoint；选择记录在 `best_checkpoints.json`。独立 LoCoMo/S 新实验使用 `runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train/`，最终 test 优先使用 validation 最佳 reward 模型。旧运行不回写。详见 [奖励与 checkpoint 更新](doc/reward_outcome_gated_20261024.md)。
 
 ## 环境
 
@@ -81,13 +91,15 @@ python -m agmem build-directories
 
 Writer 输入中没有当前 query、选项标签或 evidence 标注。Writer 摘要和响应缓存均按完整历史 ID、模型指纹、prompt 和生成配置隔离，只有完整历史一致的 query 共享目录。不同轨迹即使当前 session 与前文窗口相同，也分别请求 Writer 生成摘要。
 
-`content` 使用事实短句，以分号分隔，明确主体、动作/状态及结果；优先保留具有辨识度的实体、时间、数量、偏好和约束。在预算内覆盖多个独立话题，优先压缩寒暄和重复；区分事件日期与 session 日期，无可靠依据时保留相对时间，并保留计划/进行/完成/取消等状态及变化。所有摘要事实必须来自当前 session，前 5 个 session 仅辅助有依据的指代消解；保留人物归属、否定和不确定性，不把提问或假设写成既定事实。这些内容要求由提示词引导，格式和长度校验本身不判断事实准确性。
+`content` 使用事实短句，以分号分隔，明确主体、动作/状态及结果；优先保留具有辨识度的实体、时间、数量、偏好和约束。在预算内覆盖多个独立话题，优先压缩寒暄和重复；区分事件日期与 session 日期，无可靠依据时保留相对时间，并保留计划/进行/完成/取消等状态及变化。所有摘要事实必须来自当前 session，前 3 个 session 仅辅助有依据的指代消解；保留人物归属、否定和不确定性，不把提问或假设写成既定事实。这些内容要求由提示词引导，格式和长度校验本身不判断事实准确性。
 
-目录写入 `data/prepared/session_jsonl_v2/directories.jsonl`，每行一个 session 目录项，包含 `memory_id`、`version`、`id`、`session_id`、`order` 和最多 200 tokens 的 `content`。Reader 根据当前问题的 `memory_id` 加载完整目录，按选中 ID 从 `memory_records.jsonl` 中该轨迹的有序 sessions 定位原文。训练与检索直接读取这些 JSONL 文件。
+目录写入 `data/prepared/session_jsonl_v2/directories.jsonl`，每行一个 session 目录项，包含 `memory_id`、`version`、`id`、`session_id`、`order` 和最多 300 tokens 的 `content`。Reader 根据当前问题的 `memory_id` 加载完整目录，按选中 ID 从 `memory_records.jsonl` 中该轨迹的有序 sessions 定位原文。训练与检索直接读取这些 JSONL 文件。
 
 每完成一项就追加保存，`directory_manifest.json` 标记完整生成并校验过的目录；中断后重跑可继续同一历史尚未完成的部分。`*.index.json` 仅保存可重建的字节偏移索引，`completions.jsonl` 保存模型响应缓存。
 
-`writer.content_max_tokens: 200` 限制摘要正文，`writer.max_output_tokens: 384` 为包含 JSON 结构与转义字符的完整输出预留空间。首次 Writer 提示明确要求仅输出一个 JSON 对象，只有 `content` 键，值为非空字符串；禁止 Markdown 围栏、附加字段、注释和对象之外的文字。正文上限为 200 tokens，无额外较低目标，也无需凑满。校验失败时反馈上一次输出与实际错误：格式错误要求修复格式，超长错误要求保留关键事实并压缩至同一上限；重试不再递减目标长度。提示词不等于约束解码，仍保留实际 JSON 解析与 tokenizer 长度检查。重试耗尽时报告实际 token 数与上限。提示和格式重试协议变更会更新目录版本；仅提示变更时重新运行 `build-directories`，存储格式变更则先重新 `prepare`。
+Writer 只生成摘要纯文本，`writer.content_max_tokens: 300` 同时作为模型请求的 `max_tokens` 和最终 `content` 上限；不再输出 JSON、`content` 字段名或目录元数据。事实短句、实体细节、时间状态、多个话题及当前 session 证据边界等摘要要求保持不变。程序提取 session ID、顺序、时间、人物等元数据，将摘要放入 `content`，再序列化为 JSONL 目录项。300 tokens 是上限，无需凑满。
+
+Writer 返回非空正文时，即使 `finish_reason=length` 也直接接受，不做长度或格式重试。若服务异常返回超过上限的文本，程序按本地 tokenizer 截取前 300 tokens；允许摘要末尾不完整。移除独立的 `writer.max_output_tokens`、`writer.format_retries` 和重试预算扩展；HTTP/连接故障仍按 service 配置重试。空正文会记录并保存为 `content: ""`、`writer_status: "empty_pending"` 的待补目录项，继续后续 session 和后续流程；不在同一次构建中立即重试，也不把空响应写入成功 completion 缓存。下次运行 `build-directories` 或全量脚本时只重试待补项，成功后清除标记，正常摘要继续复用。`prepared/manifest.json` 的 `directory_empty_pending` 记录本次构建结束时的待补数。原始 session 本身为空仍使用固定无记录摘要，不标记待补。Task Agent 仍拒绝截断答案，处理规则保持不变。成功响应缓存于 `completions.jsonl`，失败响应及结束原因、用量记录于 `service_failures.jsonl`。本次纯文本协议与 300-token 预算会更新目录版本，清洗历史可以复用，旧 JSON/200-token 目录项保留但不会被新版本复用，需要重新构建。旧运行的 `config.yaml` 快照也需将 writer 改为 `lookback_sessions: 3`、`content_max_tokens: 300`，否则仍会沿用快照中的长度。详见 [Writer 纯文本输出说明](doc/writer_plain_content_20261021.md)。
 
 每个 session 只建一个目录项，不进行 1024-token 切分、层级目录或 embedding 预筛选。按当前决定，超长目录的结构性方案尚未实现；达到模型/服务容量时显式报错，不静默截断或删除数据。
 
@@ -129,13 +141,15 @@ sbatch scripts/train.sbatch
 sbatch --partition=你的分区 --account=你的账户 scripts/train.sbatch
 ```
 
-申请资源与 `scripts/smoke.sbatch` 一致：同一节点 3 张 `a100-pcie-40gb`、120G 主机内存、16 个 CPU、10 小时。GPU 分工和 27B 服务参数也一致。脚本读取 [configs/full.yaml](configs/full.yaml)，准备全部 9 个来源的 train 与 validation，构建全部对应 session 目录，然后对合并后的 train 运行完整 1 epoch；每组采样 8 条轨迹，没有 smoke 的样本数或 group 数限制。validation 每 100 次更新评估一次；本脚本不准备 test。
+申请资源与 `scripts/smoke.sbatch` 一致：同一节点 3 张 `a100-pcie-40gb`、120G 主机内存、16 个 CPU、10 小时。GPU 分工和 27B 服务参数也一致。脚本读取 [configs/full.yaml](configs/full.yaml)，准备全部 9 个来源的 train 与 validation，构建全部对应 session 目录，然后对合并后的 train 运行完整 1 epoch；每组采样 8 条轨迹，没有 smoke 的样本数或 group 数限制。validation 每 50 次更新评估一次；本脚本不准备 test。
 
 默认持久目录为 `runs/slurm_full_train/`，其中 `prepared/` 保存清洗历史、Writer 缓存和目录，`train/` 保存模型、rollout、指标和 TensorBoard，`jobs/<job_id>.<随机后缀>/` 保存该次提交的 `job.log`、`vllm.log`、`prepare.log`、`directories.log`、`train.log`。Slurm 输出为提交目录中的 `agmem-train-<job_id>.out/.err`。首次提交保存有效配置至 `config.yaml`，后续提交使用该快照；修改默认配置不会改变已有实验。
 
-全量目录构建和训练可能超过单次 10 小时限额。再次提交相同命令会复用已落盘的 Writer 缓存，并从最新完整 checkpoint 续训。为减少超时丢失的更新，全量 Slurm 配置每次更新保存 checkpoint，保留最近两个；这会增加磁盘写入，每份含优化器状态的 checkpoint 约 61 GB。中断时尚未完成的更新需要重跑，尚未写完的 checkpoint 会归档到本次作业日志目录；若首次 checkpoint 尚未完成，保留旧训练日志后从初始 Reader 重启。全部训练成功才写入 `train.complete`，存在该标记时再次提交会直接结束。
+全量目录构建和训练可能超过单次 10 小时限额。再次提交相同命令会复用已落盘的 Writer 缓存，并从最新完整 checkpoint 续训。为减少超时丢失的更新，全量 Slurm 配置每次更新保存 checkpoint，保留最近两个，并额外保护 validation reward/F1 最佳点；这会增加磁盘写入，每份含优化器状态的 checkpoint 约 61 GB。中断时尚未完成的更新需要重跑，尚未写完的 checkpoint 会归档到本次作业日志目录；若首次 checkpoint 尚未完成，保留旧训练日志后从初始 Reader 重启。全部训练成功才写入 `train.complete`，存在该标记且没有待补空摘要时再次提交会直接结束；若还有待补项，再次提交会只补目录，不重复已经完成的训练。
 
-默认服务端口固定为 8000，以保持 Writer 缓存标识一致；端口被占用会报错。可以在**首次提交新实验时**通过 `AGMEM_SERVICE_PORT` 指定其他端口，后续续训沿用快照中的端口。新实验通过 `AGMEM_RUN_DIR` 指定新的持久目录，同一目录不允许并发作业；conda 和项目目录覆盖变量与 smoke 脚本相同。
+三个全量脚本均先把完整 Bash 执行流程解析为函数，再开始启动服务和准备数据；正常结束也在该函数内退出。这样直接使用 `bash scripts/train_a6000.sbatch` 运行时，即使源 sbatch 文件随后被编辑，已启动的 Bash 流程也不会继续从被改写文件中读取错位内容。
+
+服务端口默认尝试 8000，以保持 Writer 缓存标识一致；如果端口被占用，且尚未创建 prepared 或训练输出目录、没有显式指定 `AGMEM_SERVICE_PORT`，脚本会自动选择空闲端口并更新配置快照。只有配置快照、尚无上述产物时，也可以通过 `AGMEM_SERVICE_PORT` 修改端口。已有产物时，后续续训沿用快照中的端口；冲突会明确报错，避免改变缓存和 checkpoint 的版本标识。显式指定的端口被占用时也会报错。新实验通过 `AGMEM_RUN_DIR` 指定新的持久目录，同一目录不允许并发作业；conda 和项目目录覆盖变量与 smoke 脚本相同。此逻辑适用于 A100、H100 和 A6000 三个全量脚本。
 
 ```bash
 # 新建一个独立实验（后续续训继续使用同一个 AGMEM_RUN_DIR）：
@@ -145,6 +159,26 @@ tensorboard --logdir runs/slurm_full_train/train/tensorboard --host 127.0.0.1 --
 ```
 
 脚本沿用当前上下文和显存设置，不自动截断超长历史或跳过样本；全量数据的容量限制仍需在实际运行中验证。
+
+### 两张 H100 的全量训练
+
+```bash
+sbatch scripts/train_h100.sbatch
+```
+
+[scripts/train_h100.sbatch](scripts/train_h100.sbatch) 申请同一节点的 2 张 `nvidia_h100_80gb_hbm3`：第一张训练 4B Reader，第二张以 TP=1 部署 27B Writer/Task Agent，BF16 和 65536 上下文保持一致。内存、CPU 和时限沿用创建时的 `scripts/train.sbatch`：120G、16 个 CPU、60 小时（当前原脚本的时限已从最初的 10 小时调整为 60 小时）。
+
+数据准备、目录构建、训练配置、日志及自动续训逻辑均沿用原脚本，默认共用 `runs/slurm_full_train/`；同一目录的作业不能并发。若要新建独立实验，可使用 `AGMEM_RUN_DIR="$PWD/runs/slurm_full_train_h100" sbatch scripts/train_h100.sbatch`。Slurm 输出文件为 `agmem-train-h100-<job_id>.out/.err`。
+
+### 三张 RTX A6000 的全量训练
+
+```bash
+sbatch scripts/train_a6000.sbatch
+```
+
+[scripts/train_a6000.sbatch](scripts/train_a6000.sbatch) 申请同一节点的 3 张 `nvidia_rtx_a6000`：第一张训练 4B Reader，另外两张以 TP=2 部署 27B Writer/Task Agent。沿用原全量脚本的 120G 主机内存、16 个 CPU、60 小时时限，以及 BF16、65536 服务上下文和完整训练流程。
+
+默认复用 `runs/slurm_full_train/` 的数据、配置快照和 checkpoint，同一目录的作业不能并发。独立实验使用 `AGMEM_RUN_DIR="$PWD/runs/slurm_full_train_a6000" sbatch scripts/train_a6000.sbatch`。Slurm 输出文件为 `agmem-train-a6000-<job_id>.out/.err`。
 
 ## 训练与验证
 
@@ -156,7 +190,7 @@ CUDA_VISIBLE_DEVICES=0 python -m agmem evaluate \
   --split validation --output runs/trained_reader_validation
 ```
 
-第一条为正式训练；第二条评估初始 Reader；第三条评估指定训练 checkpoint。训练默认每 100 个更新在固定 validation 上评估、保存 checkpoint，保留最近两个 checkpoint；路径按实际输出调整。test 只在显式 `evaluate --split test` 时参与评测，不参与参数更新。
+第一条为正式训练；第二条评估初始 Reader；第三条评估指定训练 checkpoint。训练默认每 50 个更新在固定 validation 上评估，周期 checkpoint 每 100 个更新保存（LoCoMo/S 独立脚本每步保存）；验证步也保存 checkpoint，保留最近两个及验证最佳 checkpoint；路径按实际输出调整。test 只在显式 `evaluate --split test` 时参与评测，不参与参数更新。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m agmem train \
@@ -213,7 +247,7 @@ CPU offload 显著使用主机内存、传输与磁盘；4B 全参的 master/mom
 
 `runs/.../groups/*.json.gz` 保存完整轨迹和状态指纹；`train_metrics.jsonl` 保存更新、F1、调用成本、方差和 logprob 差异指标；评估目录保存逐样本 episodes 和按来源/总体/来源平均的指标。指标是本地划分的标签或文本 F1、reward 和成本，尚未接入各 benchmark 额外的官方 Judge 协议，也未接入下一阶段 MemoryArena 环境。
 
-每个训练 group 还自动保存一份便于查看的精简轨迹：`runs/.../rollouts/group-00000000.json`（与完整 group 文件使用相同的从零开始编号）。`rollouts` 数组中每条包含 `reader_steps`：逐轮记录 `reader_output`（原始输出，含可能的格式错误）与 `action`（解析成功的 `ids`、`stop`，失败为 null）；`task_agent_output` 是 Task Agent 的最终答案。同时保留样本 ID、结束原因、F1 和 reward；新运行额外记录 `read_cost`、`format_failure`、`format_reward`。精简文件不包含输入 prompt、目录内容、检索原文、token IDs 或 logprob；完整审计文件仍保留。
+每个训练 group 还自动保存一份便于查看的精简轨迹：`runs/.../rollouts/group-00000000.json`（与完整 group 文件使用相同的从零开始编号）。`rollouts` 数组中每条包含 `reader_steps`：逐轮记录 `reader_output`（原始输出，含可能的格式错误）与 `action`（解析成功的 `ids`、`stop`，失败为 null）；`task_agent_output` 是 Task Agent 的最终答案。同时保留样本 ID、结束原因、F1 和 reward；新运行额外记录 `outcome_reward`、`raw_read_cost`、`read_cost`、`format_failure`、`format_reward`。精简文件不包含输入 prompt、目录内容、检索原文、token IDs 或 logprob；完整审计文件仍保留。
 
 已完成的训练可以补导出，无需模型、GPU 或重跑训练：
 
@@ -261,7 +295,7 @@ nohup env CUDA_VISIBLE_DEVICES=1,2 \
   --dtype bfloat16 \
   --tensor-parallel-size 2 \
   --max-model-len 65536 \
-  --max-num-seqs 1 \
+  --max-num-seqs 2 \
   --gpu-memory-utilization 0.90 \
   --language-model-only \
   > logs/vllm-27b.log 2>&1 < /dev/null &
@@ -282,7 +316,7 @@ CUDA_VISIBLE_DEVICES=0 python -m agmem \
   --config configs/smoke.yaml train --max-groups 1
 ```
 
-这会完成一组 **8 条完整轨迹**的采样、Task Agent 评分、全参反向传播和参数更新。当前实现依次采样这 8 条轨迹。
+这会完成一组 **8 条完整轨迹**的采样、Task Agent 评分、全参反向传播和参数更新。默认每批推进 2 条 Reader 轨迹，Task Agent 最多并发 2 个请求；8 条轨迹及评分全部完成后统一更新参数。
 
 **3．单组验证通过后，构建完整目录并正式训练**
 

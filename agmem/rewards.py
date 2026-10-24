@@ -32,8 +32,16 @@ def outcome(example, prediction: str) -> float:
 
 def score_trajectory(example, trajectory, config):
     """Apply one terminal reward, including at most one format penalty."""
+    formula = config.get("formula", "outcome_cost_v1")
+    if formula not in {"outcome_cost_v1", "outcome_gated_v2"}:
+        raise ValueError(f"Unknown reward formula: {formula}")
     trajectory.outcome = outcome(example, trajectory.prediction)
-    trajectory.read_cost = config["read_call_cost"] * trajectory.n_read_calls
+    trajectory.raw_read_cost = config["read_call_cost"] * trajectory.n_read_calls
+    trajectory.outcome_reward = trajectory.outcome
+    trajectory.read_cost = trajectory.raw_read_cost
+    if formula == "outcome_gated_v2":
+        trajectory.outcome_reward = 2 * trajectory.outcome - 1
+        trajectory.read_cost *= trajectory.outcome
     # Inspect every generated action, including the last decision after the read
     # budget is exhausted. A later valid stop does not erase an earlier bad batch.
     trajectory.format_failure = trajectory.termination_reason == "protocol_failure" or any(
@@ -45,7 +53,7 @@ def score_trajectory(example, trajectory, config):
     )
     # Standalone historical run configs lack this key: preserve their old reward.
     trajectory.format_reward = -config.get("format_penalty", 0.0) if trajectory.format_failure else 0.0
-    trajectory.reward = trajectory.outcome - trajectory.read_cost + trajectory.format_reward
+    trajectory.reward = trajectory.outcome_reward - trajectory.read_cost + trajectory.format_reward
     return trajectory
 
 

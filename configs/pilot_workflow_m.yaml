@@ -1,0 +1,4 @@
+# Later: resume M directory construction and run an independent M experiment.
+directory_sources: [split_longmemeval_m]
+training_sources: [split_longmemeval_m]
+experiment: longmemeval_m

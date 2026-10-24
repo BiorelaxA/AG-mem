@@ -15,8 +15,12 @@ def main():
     command = commands.add_parser("prepare", help="Adapt fixed train/validation/test; clean annotations and report quarantines")
     command.add_argument("--limit-per-source", type=int)
     command.add_argument("--skip-file-verification", action="store_true", help="Disables fingerprint parsing acceleration too")
+    command.add_argument("--sources", nargs="+", help="Prepare only selected datasets (by_source layout)")
     command = commands.add_parser("build-directories", help="Offline session summaries using the frozen 27B service")
     command.add_argument("--limit-memories", type=int)
+    command.add_argument("--sources", nargs="+", help="Build only selected datasets (by_source layout)")
+    command = commands.add_parser("import-prepared", help="Split selected datasets out of an existing combined prepared store; reuse summaries")
+    command.add_argument("source_root")
     command = commands.add_parser("train")
     command.add_argument("--max-groups", type=int)
     command.add_argument("--resume")
@@ -51,9 +55,11 @@ def main():
     config = load_config(args.config)
     from . import pipeline
     if args.command == "prepare":
-        pipeline.prepare(config, args.limit_per_source, not args.skip_file_verification)
+        pipeline.prepare(config, args.limit_per_source, not args.skip_file_verification, args.sources)
     elif args.command == "build-directories":
-        pipeline.build_directories(config, args.limit_memories)
+        pipeline.build_directories(config, args.limit_memories, args.sources)
+    elif args.command == "import-prepared":
+        pipeline.import_prepared(config, args.source_root)
     elif args.command == "train":
         if args.output_dir:
             config["training"]["output_dir"] = args.output_dir

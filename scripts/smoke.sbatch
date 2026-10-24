@@ -120,6 +120,10 @@ config["service"]["base_url"] = f"http://127.0.0.1:{port}/v1"
 (run_dir / "config.yaml").write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
 PY
 
+# Per-attempt scheduling only: retain the frozen Writer identity and checkpoint config.
+SERVICE_MAX_SEQS=$(python -m agmem.execution "$CONFIG_PATH" "$RUN_DIR/execution_config.yaml")
+CONFIG_PATH="$RUN_DIR/execution_config.yaml"
+echo "Execution config: $CONFIG_PATH; vLLM max-num-seqs=$SERVICE_MAX_SEQS"
 TASK_MODEL=$(python - "$CONFIG_PATH" <<'PY'
 import sys
 from agmem.core import load_config
@@ -134,7 +138,7 @@ setsid env CUDA_VISIBLE_DEVICES="$SERVICE_GPUS" vllm serve "$TASK_MODEL" \
     --dtype bfloat16 \
     --tensor-parallel-size 2 \
     --max-model-len 65536 \
-    --max-num-seqs 1 \
+    --max-num-seqs "$SERVICE_MAX_SEQS" \
     --gpu-memory-utilization 0.90 \
     --language-model-only \
     > "$RUN_DIR/vllm.log" 2>&1 &

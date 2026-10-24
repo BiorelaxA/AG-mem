@@ -26,7 +26,7 @@
 
 Reader 根据 query 的 `memory_id` 载入该完整目录并输出目录 `id`；工具仅在同一历史中定位对应 session，返回完整原文和对应摘要。顶层来源 session ID 保留用于追溯；目录 `id` 同时区分重复来源 ID 和不同位置。消息中的评测标注不进入清洗后原文，gold-derived `answer_` 来源 ID 前缀仍按原约定移除。
 
-Writer 仍为第 t 个 session 读取同一轨迹的当前 session 与前 5 个 session，仅概括当前 session。摘要正文现上限 200 tokens，完整 JSON 输出预算 384 tokens（2026-10-19 后续更新）。每生成一个合法目录项即写入 JSONL，中断后可以在同一轨迹和版本下续建；完整结束后发布目录校验清单。已完成的目录文件重新加载后直接用于训练，保留 8-rollout GRPO、F1 outcome 和每次检索 0.01 成本；2026-10-20 新增每条轨迹最多一次 0.1 的 Reader 格式惩罚，见 `format_reward_20261020.md`。
+Writer 仍为第 t 个 session 读取同一轨迹的当前 session 与前 3 个 session，仅概括当前 session。2026-10-21 改为直接生成最多 300 tokens 的摘要纯文本，程序组装其余元数据和目录 JSON；非空 length 响应直接接受，超长按 tokenizer 截断，不再做格式/长度重试。每生成一个目录项即写入 JSONL，中断后可以在同一轨迹和版本下续建；完整结束后发布目录校验清单。旧 JSON/200-token 目录保留在旧版本下，新版本需重新生成，清洗历史可继续复用。已完成的目录文件重新加载后直接用于训练，保留 8-rollout GRPO、F1 outcome 和每次检索 0.01 成本；2026-10-20 新增每条轨迹最多一次 0.1 的 Reader 格式惩罚，见 `format_reward_20261020.md`。
 
 ## 从 SQLite 切换
 
@@ -55,3 +55,7 @@ CUDA_VISIBLE_DEVICES=0 python -m agmem train
 - prepare → build-directories → 训练环境装配的集成检查使用临时 Parquet、JSONL 与模拟 Writer，确认正式管线不依赖数据库。
 - 真实 processed 数据的 smoke prepare 已完成：2 条 train、2 条 validation、3 条完整历史、78 个 session。
 - 真实 27B 的新格式目录构建和实际 GPU 梯度更新需要在 GPU 节点执行上述命令；CPU 模拟结果不代表显存验证通过。
+
+## Writer 空摘要待补标记（2026-10-21）
+
+模型返回空正文时目录项保存 content: "" 和 writer_status: "empty_pending"，构建继续；它不同于原始空 session 的固定无记录摘要。空响应不进入成功响应缓存，后续续跑只重试待补项，成功后去掉标记。正常摘要与来源元数据继续保持不可覆盖，只有明确空占位项的 content/状态允许在同一版本更新。JSONL 追加写入更新行，以索引指向的最新行为准；补齐时失效旧快照和内存缓存，重新发布目录校验清单。prepared/manifest.json 的 directory_empty_pending 保存构建结束时的总数。

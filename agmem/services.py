@@ -1,12 +1,23 @@
 from __future__ import annotations
 
-import json
 import os
 import time
+from concurrent.futures import Future
+from threading import Lock
 
-from .core import InfrastructureError, canonical, digest
+from .core import InfrastructureError, append_json, canonical, digest
 from .data import ADAPTER_VERSION
+from .execution import bounded_results
 from .prompts import writer_messages
+
+
+class IncompleteServiceCompletion(InfrastructureError):
+    """A response with missing content or an unacceptable truncated task answer."""
+
+    def __init__(self, text, finish_reason, usage):
+        self.text, self.finish_reason, self.usage = text, finish_reason, usage
+        super().__init__(f"Incomplete service completion: finish_reason={finish_reason!r}, "
+                         f"content_chars={len(text) if isinstance(text, str) else 0}, usage={usage}")
 
 
 class ChatService:
@@ -19,32 +30,77 @@ class ChatService:
             raise ValueError("Set service.model_revision to the local checkpoint fingerprint/version")
         import httpx
         self.client = httpx.Client(timeout=config.get("timeout_seconds", 600))
+        self._lock = Lock()
+        self._inflight = {}
 
     def complete(self, messages: list[dict], max_tokens: int, seed: int = 42, cache_scope: str | None = None) -> str:
         request = {"model": self.config["model"], "messages": messages, "temperature": 0.0,
                    "max_tokens": max_tokens, "seed": seed,
                    "chat_template_kwargs": {"enable_thinking": False}}
         key = digest({"identity": self.identity, "role": self.role, "request": request, "cache_scope": cache_scope})
-        cached = self.store.completion(key)
-        if cached is not None:
-            return cached
+        # Identical evidence can occur in several rollouts. Share one request,
+        # including its failure, without serializing unrelated HTTP requests.
+        with self._lock:
+            cached = self.store.completion(key)
+            if cached is not None:
+                return cached
+            future = self._inflight.get(key)
+            owner = future is None
+            if owner:
+                future = self._inflight[key] = Future()
+        if not owner:
+            return future.result()
+        try:
+            text = self._request(request, key, cache_scope, max_tokens)
+            future.set_result(text)
+            return text
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+
+    def _request(self, request, key, cache_scope, max_tokens):
         headers = {}
         env_name = self.config.get("api_key_env")
         if env_name and os.environ.get(env_name):
             headers["Authorization"] = "Bearer " + os.environ[env_name]
         last_error = None
         for attempt in range(self.config.get("retries", 2) + 1):
+            response, payload = None, None
             try:
-                response = self.client.post(self.config["base_url"].rstrip("/") + "/chat/completions", json=request, headers=headers)
+                # Deployment port may differ between jobs; base_url remains the
+                # frozen cache identity for the same fingerprinted local model.
+                endpoint = self.config.get("request_base_url", self.config["base_url"])
+                response = self.client.post(endpoint.rstrip("/") + "/chat/completions", json=request, headers=headers)
                 response.raise_for_status()
-                choice = response.json()["choices"][0]
+                payload = response.json()
+                choice = payload["choices"][0]
                 text = choice["message"]["content"]
-                if choice.get("finish_reason") == "length" or not isinstance(text, str) or not text.strip():
-                    raise ValueError("Truncated or empty service completion")
+                if (not isinstance(text, str) or not text.strip()
+                        or (choice.get("finish_reason") == "length" and self.role != "writer")):
+                    raise IncompleteServiceCompletion(text, choice.get("finish_reason"), payload.get("usage"))
+                if choice.get("finish_reason") == "length" and self.role == "writer":
+                    print(canonical({"event": "writer_output_truncated", "cache_scope": cache_scope,
+                                     "max_tokens": max_tokens, "usage": payload.get("usage")}), flush=True)
                 self.store.put_completion(key, text)
                 return text
             except Exception as exc:
                 last_error = exc
+                log_path = self.store.root / "service_failures.jsonl"
+                record = {"timestamp": time.time(), "role": self.role, "cache_scope": cache_scope, "request_key": key,
+                          "attempt": attempt + 1, "max_tokens": max_tokens,
+                          "status_code": response.status_code if response is not None else None,
+                          "error_type": type(exc).__name__, "error": str(exc), "response": payload}
+                with self._lock:
+                    append_json(log_path, record)
+                print(canonical({"event": "service_failure", "role": self.role,
+                                 "cache_scope": cache_scope, "attempt": attempt + 1,
+                                 "max_tokens": max_tokens, "error": str(exc),
+                                 "response_log": str(log_path)}), flush=True)
+                if isinstance(exc, IncompleteServiceCompletion) and self.role == "writer":
+                    raise
                 if attempt < self.config.get("retries", 2):
                     time.sleep(min(2 ** attempt, 8))
         raise InfrastructureError(f"{self.role} service failed ({type(last_error).__name__}); no task score assigned") from last_error
@@ -53,72 +109,70 @@ class ChatService:
 class DirectoryBuilder:
     def __init__(self, store, service, config: dict, tokenizer):
         self.store, self.service, self.config, self.tokenizer = store, service, config, tokenizer
-        if config["lookback_sessions"] < 5:
-            raise ValueError("Writer needs at least five previous original sessions")
+        if config["lookback_sessions"] < 3:
+            raise ValueError("Writer needs at least three previous original sessions")
         identity = {"writer": service.identity, "config": config, "record_unit": ADAPTER_VERSION,
                     "storage_format": store.FORMAT, "reuse_scope": "complete_history",
-                    "format_protocol": 3, "prompt": writer_messages([], {}, config["content_max_tokens"])}
+                    "format_protocol": 4, "prompt": writer_messages([], {}, config["content_max_tokens"])}
         self.version = digest(identity)
 
-    def build(self, memory_id: str) -> list[dict]:
+    def build(self, memory_id: str, workers: int = 1) -> list[dict]:
         try:
-            return self.store.directory(memory_id, self.version)
+            directory = self.store.directory(memory_id, self.version)
+            if all(entry.get("writer_status") != "empty_pending" and entry["content"].strip()
+                   for entry in directory):
+                return directory
         except ValueError:
             pass
         references = self.store.memory(memory_id)
-        entries = []
+        entries = [None] * len(references)
         lookback = self.config["lookback_sessions"]
-        for index, reference in enumerate(references):
-            context = [self.store.record(row) for row in references[max(0, index - lookback):index]]
-            target = self.store.record(reference)
-            messages = writer_messages(context, target, self.config["content_max_tokens"])
-            cached = self.store.directory_entry(memory_id, self.version, reference["id"])
-            content = cached["content"] if cached is not None else None
+
+        def requests():
+            # Only the coordinator reads histories and modifies directory indexes.
+            # Raw preceding sessions are independent of their Writer summaries.
+            for index, reference in enumerate(references):
+                cached = self.store.directory_entry(memory_id, self.version, reference["id"])
+                if cached is not None and cached.get("writer_status") != "empty_pending" and cached["content"].strip():
+                    entries[index] = cached
+                    continue
+                target = self.store.record(reference)
+                context = [self.store.record(row) for row in references[max(0, index - lookback):index]]
+                messages = writer_messages(context, target, self.config["content_max_tokens"])
+                yield index, reference, target, messages
+
+        def generate(item):
+            _, _, target, messages = item
             if not target["messages"]:
-                content = "Empty session; no recorded messages."
-            if content is None:
-                last_error = None
-                current = messages
-                max_attempts = self.config.get("format_retries", 2) + 1
-                for attempt in range(max_attempts):
-                    text = self.service.complete(current, self.config.get("max_output_tokens", 384),
-                                                 cache_scope=f"{memory_id}/{self.version}")
-                    overlength = False
-                    try:
-                        value = json.loads(text)
-                        if not isinstance(value, dict) or set(value) != {"content"}:
-                            raise ValueError('Expected one JSON object with only the "content" key')
-                        content = value["content"]
-                        if not isinstance(content, str) or not content.strip():
-                            raise ValueError('The "content" value must be a nonempty string')
-                        token_count = len(self.tokenizer.encode(content, add_special_tokens=False))
-                        if token_count > self.config["content_max_tokens"]:
-                            overlength = True
-                            raise ValueError(f"Summary contains {token_count} tokens; content_max_tokens={self.config['content_max_tokens']}")
-                        break
-                    except (ValueError, KeyError, TypeError) as exc:
-                        content, last_error = None, exc
-                        if attempt + 1 < max_attempts:
-                            repair = ("Shorten the summary to meet that limit, retaining the most useful facts from TARGET_SESSION. "
-                                      if overlength else
-                                      "Repair the JSON format; preserve useful summary facts within that limit. ")
-                            feedback = (f"Validation failed: {exc}. Rewrite your previous answer as valid JSON only, "
-                                        f'with exactly one key, "content", containing a nonempty summary string. '
-                                        "Do not use Markdown code fences or add text outside the JSON object. "
-                                        f"The decoded content limit is {self.config['content_max_tokens']} tokens. "
-                                        f"{repair}Retry {attempt + 1}.")
-                            current = messages + [{"role": "assistant", "content": text},
-                                                  {"role": "user", "content": feedback}]
-                if content is None:
-                    raise ValueError(f"Writer format failure at {memory_id}/{reference['id']} "
-                                     f"after {max_attempts} attempts: {last_error}") from last_error
+                return "Empty session; no recorded messages."
+            try:
+                return self.service.complete(messages, self.config["content_max_tokens"],
+                                             cache_scope=f"{memory_id}/{self.version}")
+            except IncompleteServiceCompletion as exc:
+                if isinstance(exc.text, str) and exc.text.strip():
+                    raise
+                return ""
+
+        for (index, reference, target, _), content in bounded_results(generate, requests(), workers):
+            # Metadata and JSON escaping belong to the program. A length-limited
+            # Writer response is usable as-is; never ask the model to repair it.
+            content = content.strip() if isinstance(content, str) else ""
+            token_ids = self.tokenizer.encode(content, add_special_tokens=False)
+            if len(token_ids) > self.config["content_max_tokens"]:
+                content = self.tokenizer.decode(token_ids[:self.config["content_max_tokens"]],
+                                                skip_special_tokens=True, clean_up_tokenization_spaces=False)
             names = sorted({message.get("name") or message["role"] for message in target["messages"]})
             entry = {"id": reference["id"],
                      "task_session": {"task_id": None, "session_id": reference["source_session_id"]},
                      "actors_source": {"actors": names, "sources": []},
                      "time_order": {"time": reference["time"], "order": index}, "content": content}
+            if not content:
+                entry["writer_status"] = "empty_pending"
+                print(canonical({"event": "writer_empty_pending", "memory_id": memory_id,
+                                 "session_id": reference["source_session_id"], "id": reference["id"],
+                                 "version": self.version}), flush=True)
             self.store.put_directory_entry(memory_id, self.version, entry)
-            entries.append(entry)
+            entries[index] = entry
         self.store.put_directory(memory_id, self.version, entries)
         return entries
 

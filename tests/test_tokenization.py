@@ -50,7 +50,7 @@ class ChatTokenizationTests(unittest.TestCase):
             store = Store(Path(temporary))
             identity = {"model": "fixture", "base_url": "http://fixture/v1", "model_revision": "fixture-v1"}
             config = {"service": identity, "models": {"task_path": "fixture"},
-                      "writer": {"lookback_sessions": 5, "content_max_tokens": 96},
+                      "writer": {"lookback_sessions": 3, "content_max_tokens": 300},
                       "retrieval": {"max_ids_per_call": 10, "max_read_calls": 8},
                       "task_agent": {"max_context_tokens": 4, "max_output_tokens": 2}}
             version = DirectoryBuilder(store, SimpleNamespace(identity=identity), config["writer"], None).version

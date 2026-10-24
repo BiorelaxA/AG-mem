@@ -1,0 +1,15 @@
+extends: default.yaml
+data:
+  layout: by_source
+  prepared_root: runs/locomo_longmemeval/prepared
+  # LoCoMo/S belong exclusively to train_eval_locomo_s; build M first here.
+  sources: [split_longmemeval_m, perltqa_en, perltqa_zh, personamem_128k, personamem_32k, personamem_v2_128k, zh4o]
+  splits: [train, validation]
+service:
+  base_url: http://127.0.0.1:50543/v1
+jobs:
+  test_prepared_root: runs/locomo_longmemeval/prepared_test
+  legacy_prepared_root: runs/slurm_full_train/prepared
+training:
+  checkpoint_every: 1
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s/train
