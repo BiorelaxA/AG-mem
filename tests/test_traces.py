@@ -74,6 +74,24 @@ class TraceTests(unittest.TestCase):
             self.assertEqual(compact_path.read_bytes(), exported)
             self.assertEqual(full_path.read_bytes(), original)
 
+    def test_truncated_ids_are_auditable_without_session_text(self):
+        from agmem.traces import compact_group
+        row = self.trajectory()
+        row.decisions[0].action = {'ids': ['s1', 's2', 'ignored'], 'stop': False}
+        row.decisions[0].tool_result = {
+            'ids_truncated': True, 'selected_ids': ['s1', 's2'],
+            'records': [{'id': key, 'raw_text': 'PRIVATE_TEXT'} for key in ['s1', 's2']]}
+        group = {'group_id': 'g', 'directory_version': 'v', 'rollouts': [row.to_dict()]}
+        compact = compact_group(group)
+        step = compact['rollouts'][0]['reader_steps'][0]
+        self.assertEqual(step['action']['ids'], ['s1', 's2', 'ignored'])
+        self.assertEqual(step['returned_ids'], ['s1', 's2'])
+        self.assertTrue(step['ids_truncated'])
+        self.assertNotIn('PRIVATE', json.dumps(compact))
+        row.decisions[0].tool_result['records'] = []
+        group['rollouts'] = [row.to_dict()]
+        self.assertEqual(compact_group(group)['rollouts'][0]['reader_steps'][0]['returned_ids'], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -142,8 +142,11 @@ def load_config(path: str | Path) -> dict:
         raise ValueError("Reader must use full parameter training")
     if value["memory"]["record_unit"] != "session" or value["writer"]["lookback_sessions"] < 3:
         raise ValueError("Use one entry per session and at least three preceding sessions")
-    if value["retrieval"]["max_ids_per_call"] != 10 or value["reward"]["read_call_cost"] != 0.01:
-        raise ValueError("Experiment fixes max_ids_per_call=10 and read_call_cost=0.01")
+    max_ids = value["retrieval"]["max_ids_per_call"]
+    if type(max_ids) is not int or max_ids < 1:
+        raise ValueError("retrieval.max_ids_per_call must be a positive integer")
+    if value["reward"]["read_call_cost"] != 0.01:
+        raise ValueError("Experiment fixes read_call_cost=0.01")
     penalty = value["reward"].get("format_penalty", 0.0)
     if value["reward"].get("formula", "outcome_cost_v1") not in {"outcome_cost_v1", "outcome_gated_v2"}:
         raise ValueError("Unknown reward.formula")

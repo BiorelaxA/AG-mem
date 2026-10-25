@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import time
+from ipaddress import ip_address
 from concurrent.futures import Future
 from threading import Lock
+from urllib.parse import urlsplit
 
 from .core import InfrastructureError, append_json, canonical, digest
 from .data import ADAPTER_VERSION
@@ -29,7 +31,15 @@ class ChatService:
         if not config["model_revision"] or config["model_revision"].startswith("REQUIRED"):
             raise ValueError("Set service.model_revision to the local checkpoint fingerprint/version")
         import httpx
-        self.client = httpx.Client(timeout=config.get("timeout_seconds", 600))
+        endpoint = config.get("request_base_url", config["base_url"])
+        host = (urlsplit(endpoint).hostname or "").rstrip(".").lower()
+        try:
+            loopback = ip_address(host).is_loopback
+        except ValueError:
+            loopback = host == "localhost"
+        # SSH/tmux may inherit a proxy whose forwarded port no longer exists.
+        # Local vLLM must be contacted directly; remote endpoints retain proxies.
+        self.client = httpx.Client(timeout=config.get("timeout_seconds", 600), trust_env=not loopback)
         self._lock = Lock()
         self._inflight = {}
 

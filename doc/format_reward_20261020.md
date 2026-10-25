@@ -8,6 +8,8 @@
 
 ## 历史奖励公式
 
+2026-10-25 更新：当前默认每次最多 4 个 ID，环境、prompt 和 reward 共同使用 `retrieval.max_ids_per_call`。`stop=false` 超量时仅尝试读取原列表前 N 个 ID，后续 ID 不读取、不参与工具校验；原始完整动作保留用于 GRPO 与格式评分，整条 rollout 最多扣一次 0.1。前 N 个重复、未知或超过上下文容量仍拒绝本次读取。`stop=true` 忽略全部 ID。下文 10-ID 整批拒绝规则为历史行为，以本段及最新实现规格为准。
+
 ```text
 reward = outcome_f1 - 0.01 * read_calls - format_penalty * format_failure
 format_penalty = 0.1

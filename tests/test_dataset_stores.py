@@ -205,6 +205,8 @@ class DatasetStoreTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 row = {"question": "q", "answer": "a", "haystack_sessions": canonical([
                     [{"role": "user", "content": source}]]), "haystack_session_ids": ["s0"]}
+                if source == "split_longmemeval_s":
+                    row["question_date"] = "2023/04/20 (Thu) 10:12"
                 pq.write_table(pa.Table.from_pylist([row]), path)
                 entry["output_files"][split] = {"sha256": file_digest(path)}
             sources.append(entry)

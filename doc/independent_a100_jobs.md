@@ -1,6 +1,6 @@
 # 独立的全量目录任务与 LoCoMo/S 训练评估任务
 
-目录任务申请 2 张 `a100-pcie-40gb`，时间沿用当前脚本的 96 小时；训练评估任务申请 4 张 `a100-pcie-40gb`，时间 72 小时。两者均申请 CPU 16、内存 120G。资源数量独立计费/排队，同时运行共需 6 张 GPU。未自动提交任务，也未中断旧任务。
+目录任务申请 1 张 `a100-sxm4-80gb`，时间沿用当前脚本的 96 小时；训练评估任务申请 4 张 `a100-pcie-40gb`，时间 72 小时。两者均申请 CPU 16、内存 120G。资源数量独立计费/排队，同时运行共需 5 张 GPU。未自动提交任务，也未中断旧任务。
 
 ```bash
 cd /home/hongyshen/AG-Mem
@@ -18,7 +18,7 @@ sbatch scripts/train_eval_locomo_s_a100.sbatch
 
 配置为 `configs/directory_all.yaml`，负责除 LoCoMo/S 外的七个来源。执行顺序为 LongMemEval-M、PerLTQA EN/ZH、PersonaMem 128k/32k/v2、ZH4O。LoCoMo/S 完全由训练评估任务构建，本任务不会补建或等待这两个来源。每个来源先完成 train/validation，再独立准备 test，生成其所需目录。
 
-2 张 A100 40GB 卡以 TP=2 部署冻结 Qwen3.5-27B，不加载 4B Reader、不创建优化器，也不执行训练或问答评估。Writer 默认并发 2；内容规则仍是当前 session + 前 3 个原始 session，最多输出 300 tokens，长度截断接受，空正文保留 empty_pending。
+1 张 A100 SXM4 80GB 卡以 TP=1 部署冻结 Qwen3.5-27B，不加载 4B Reader、不创建优化器，也不执行训练或问答评估。Writer 默认并发 2；内容规则仍是当前 session + 前 3 个原始 session，最多输出 300 tokens，长度截断接受，空正文保留 empty_pending。
 
 共用现有 `runs/locomo_longmemeval/prepared/<source>/`，已有摘要按原版本复用。新来源如果尚无 manifest，会尝试从 `runs/slurm_full_train/prepared` 导入同来源的已准备数据/目录；旧 full_train 仍持锁时跳过导入，按 processed Parquet 新建，而不是读取正在修改的旧文件。导入会核对输入 manifest、适配器和 split provenance，不静默混用不同数据。
 
@@ -32,9 +32,18 @@ sbatch scripts/train_eval_locomo_s_a100.sbatch
 4. 训练结束后准备两来源的 test 及其目录，使用固定 validation 的 source_macro.reward 最佳 checkpoint 完成全量 test 评估；没有验证 checkpoint 时回退到最新模型并记录原因。保留最近两个及 validation reward/F1 最佳模型，未训练基线不在此脚本内自动运行。
 5. `metrics.json` 包含 pooled、by_source、source_macro 指标，分别可查看 LoCoMo 和 LongMemEval-S 的结果。
 
-新训练采用 `2*F1-1-0.01*F1*read_calls-0.1*format_failure`，写入独立 `locomo_s_reward_v2` 实验，复用已有目录，避免接续已退化的旧 reward 实验。详见 [奖励与 checkpoint 更新](reward_outcome_gated_20261024.md)。
+新训练采用 `2*F1-1-0.01*F1*read_calls-0.1*format_failure`。修复提问日期与时间回答后，默认写入独立 `locomo_s_reward_v2_time_v1` 实验，首次提交从原始 Qwen3.5-4B 开始，复用已有目录；旧 `locomo_s_reward_v2` 实验保留供比较，不加载其 checkpoint。新实验中断后仍从新目录的最新 checkpoint 续跑。详见 [奖励与 checkpoint 更新](reward_outcome_gated_20261024.md)。
 
 训练会按最新 checkpoint 自动续跑；没有完整 checkpoint 的中断训练目录会归档到本次 job 目录后从初始 Reader 重启。有 train.complete 时不重训；测试中断后保留不完整输出并重新评估，有完整 metrics.json 则复用。改变数据、模型或奖励等训练配置不能冒充旧实验续跑。
+
+### 问题日期和时间回答（2026-10-24）
+
+LongMemEval-S/M 的 `question_date` 进入 Reader 与 Task Agent 的公开 observation。
+新 `prepare` 会直接保存该字段对应的 observation；既有 prepared 数据无需重新构建目录，训练和评估会依据样本的 source/split/原始行号从 Parquet 补齐公开日期。加载时核对输入 manifest、Parquet 哈希和问题/答案对应关系，拒绝错配；只读取 question/answer/question_date 标量列，答案仅用于一致性检查，不加入 prompt。旧 JSONL 和历史 ID 不修改。
+
+Task Agent 回答时间题时输出简洁的“绝对日期或范围 + 相对时间表达”，按证据中的 session `time` 解释历史的 yesterday/last week，按 observation 的提问日期计算多少天前；缺少锚点则说明不足，不猜测具体日期。选择题仍只输出选项标签。此修改只改变任务背景和 Task prompt，不改变 Writer、reward 或 F1 实现；措辞增加也不保证文本 F1 单调提高。
+
+Task 服务缓存键包含完整 messages，因此新 prompt/日期自动与旧回答缓存隔离。任务上下文版本和 prompt 指纹保存在 run.json、checkpoint 和新评估报告中；从旧 checkpoint 继续时记录 `task_input_contract_changed` 和 `task_input_changes.jsonl`，保留优化器、step 和数据顺序。修改前后的指标需要按此边界解读。正在运行的 Python 进程不会热加载本次修改，需要结束旧作业后重新提交才会使用新逻辑；已有历史 rollout/评估结果不会自动重算。
 
 ### Reader 双卡分层
 
@@ -51,6 +60,21 @@ Reader 使用单进程模型并行：前半 decoder layers 放在逻辑 `cuda:0`
 # 只暴露分配给 Reader 的两张卡；不要使用正被其他任务占用的卡。
 python -m unittest tests.test_model_parallel -v
 ```
+
+### 在已有 allocation 内恢复长序列 OOM
+
+训练入口现在默认启用可扩展显存分配（未显式设置 allocator 时），以及输入达到 16,384 tokens 的激活 CPU 卸载。两项设置无需修改旧 job 的冻结配置，也不改变 checkpoint 权重、优化器状态或续训位置。依然使用两张卡训练 Reader、两张卡服务 27B。
+
+在保留了原 allocation 和 27B 服务的 tmux/gpu16 会话中，可以显式指定：
+
+```bash
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+export AGMEM_ACTIVATION_OFFLOAD_MIN_TOKENS=16384
+```
+
+继续用原实验配置运行 `python -m agmem.jobs train-eval --config <原配置> --job-dir <新的日志目录>`，调度器从该实验最近的完整 checkpoint 恢复，不重新申请 GPU。先确认旧 Reader 已退出，服务地址仍可访问，并保留 `CUDA_VISIBLE_DEVICES=0,1` 和 `AGMEM_READER_MODEL_PARALLEL_SIZE=2`。不要再次启动一份 vLLM，也不要取消仍需复用的 allocation。需要重新启动训练进程才能应用内存设置。
+
+阈值 `0` 关闭激活卸载，`1` 对所有更新输入启用。卸载使用非锁页主机内存，避免大量激活与 CPU Adam 同时占用锁页内存；代价是 CPU/GPU 传输开销。更新日志记录卸载决策数、每条轨迹反向完成进度和成功更新的双卡峰值显存，OOM 则记录具体 rollout/decision 及其输入长度。日志没有宣称已通过 4B/长上下文 GPU 压测，续训时需验证原失败 group 并监控主机内存。新增双卡卸载一致性测试也会随脚本原有的 `tests.test_model_parallel` 检查运行。
 
 ## 测试集隔离与缓存复用
 
@@ -90,10 +114,10 @@ runs/train_eval_locomo_s/jobs/<job-attempt>/test.log
 持久结果：
 
 ```text
-runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train/checkpoint-*/
-runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train/rollouts/
-runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train/tensorboard/
-runs/locomo_longmemeval/experiments/locomo_s_reward_v2/evaluation/checkpoint-*/test/metrics.json
+runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/train/checkpoint-*/
+runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/train/rollouts/
+runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/train/tensorboard/
+runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/evaluation/checkpoint-*/test/metrics.json
 ```
 
 并发参数继续使用 `AGMEM_WRITER_WORKERS`、`AGMEM_TASK_AGENT_WORKERS`、`AGMEM_READER_BATCH_SIZE`、`AGMEM_READER_BATCH_MAX_TOKENS`。vLLM max-num-seqs 与 Writer/Task 并发容量同步；Reader 长输入按批预算拆批，不截断原文。

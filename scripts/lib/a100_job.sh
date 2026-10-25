@@ -15,7 +15,7 @@ command -v vllm >/dev/null
 if [[ $MODE == directories ]]; then
     BASE_CONFIG=configs/directory_all.yaml
     JOB_ROOT=${AGMEM_JOB_ROOT:-$PROJECT_DIR/runs/directory_all}
-    EXPECTED_GPUS=2
+    EXPECTED_GPUS=1
 else
     BASE_CONFIG=configs/train_eval_locomo_s.yaml
     JOB_ROOT=${AGMEM_JOB_ROOT:-$PROJECT_DIR/runs/train_eval_locomo_s}
@@ -42,8 +42,8 @@ if [[ ${#assigned_gpus[@]} -ne $EXPECTED_GPUS ]]; then
     exit 1
 fi
 if [[ $MODE == directories ]]; then
-    SERVICE_GPUS="${assigned_gpus[0]},${assigned_gpus[1]}"
-    SERVICE_TP=2
+    SERVICE_GPUS="${assigned_gpus[0]}"
+    SERVICE_TP=1
     READER_GPU=""
 else
     READER_GPU="${assigned_gpus[0]},${assigned_gpus[1]}"

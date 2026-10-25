@@ -23,7 +23,9 @@ def parse_action(text: str) -> dict:
 
 
 class MemoryEnvironment:
-    def __init__(self, store, directory_version: str, max_ids=10, max_calls=8, capacity=None):
+    def __init__(self, store, directory_version: str, max_ids=4, max_calls=8, capacity=None):
+        if type(max_ids) is not int or max_ids < 1:
+            raise ValueError("max_ids must be a positive integer")
         self.store, self.version = store, directory_version
         self.max_ids, self.max_calls, self.capacity = max_ids, max_calls, capacity
 
@@ -72,7 +74,7 @@ class MemoryEnvironment:
         trajectory = Trajectory(example.sample_id, seed, example.memory_id, policy_version)
         evidence, error = {}, None
         for decision_index in range(self.max_calls + 1):
-            messages = reader_messages(example, directory, list(evidence.values()), error)
+            messages = reader_messages(example, directory, list(evidence.values()), error, max_ids=self.max_ids)
             completion = yield messages, seed + decision_index
             decision = Decision(messages, completion, state_sha256=digest(messages))
             trajectory.decisions.append(decision)
@@ -89,9 +91,12 @@ class MemoryEnvironment:
                 trajectory.termination_reason = "max_read_calls"
                 break
             trajectory.n_read_calls += 1
-            ids = action["ids"]
+            # Preserve the sampled action for GRPO and format scoring. Execute
+            # only its ordered prefix; ignored IDs are never fetched or checked.
+            requested_ids = action["ids"]
+            ids = requested_ids[:self.max_ids]
             code = None
-            if not 1 <= len(ids) <= self.max_ids:
+            if not ids:
                 code = "invalid_batch_size"
             elif len(set(ids)) != len(ids):
                 code = "duplicate_ids_in_batch"
@@ -105,16 +110,18 @@ class MemoryEnvironment:
                 candidate = {**evidence, **{row["id"]: row for row in records}}
                 try:
                     if self.capacity:
-                        self.capacity(reader_messages(example, directory, list(candidate.values())), task_messages(example, list(candidate.values())))
+                        self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids), task_messages(example, list(candidate.values())))
                 except CapacityError:
                     code = "context_capacity_exceeded"
             if code is not None:
                 error = {"code": code, "requested_ids": ids}
-                decision.tool_result = {"ok": False, "requested_ids": ids, "records": [], "error": error}
+                decision.tool_result = {"ok": False, "requested_ids": requested_ids, "records": [], "error": error}
             else:
                 evidence.update({row["id"]: row for row in records})
-                decision.tool_result = {"ok": True, "requested_ids": ids, "records": records}
+                decision.tool_result = {"ok": True, "requested_ids": requested_ids, "records": records}
                 error = None
+            if len(requested_ids) > self.max_ids:
+                decision.tool_result.update(ids_truncated=True, selected_ids=ids)
         else:
             trajectory.termination_reason = "max_decisions"
         trajectory.evidence = list(evidence.values())

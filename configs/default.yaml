@@ -30,7 +30,7 @@ reader:
   rollout_temperature: 1.0
   rollout_use_cache: true
 retrieval:
-  max_ids_per_call: 10
+  max_ids_per_call: 4
   max_read_calls: 8
 task_agent:
   max_output_tokens: 512

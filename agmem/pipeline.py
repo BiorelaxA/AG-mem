@@ -12,7 +12,7 @@ import time
 
 from .core import CapacityError, InfrastructureError, append_json, atomic_json, canonical, digest, file_digest, seeded_int
 from .checkpoints import retain_checkpoints, validation_scores
-from .data import ADAPTER_VERSION, InvalidSample, adapt_row, clean_history, decode_list, parquet_rows
+from .data import ADAPTER_VERSION, InvalidSample, adapt_row, clean_history, decode_list, parquet_rows, task_examples
 from .env import MemoryEnvironment
 from .execution import execution_settings
 from .rewards import advantages, score_trajectory
@@ -311,7 +311,7 @@ def make_task_agent(config, store):
 def scored_rollout(config, env, policy, agent, example, seed):
     trajectory = env.run(example, policy, seed, policy.policy_version)
     trajectory.prediction, trajectory.task_input_hash = agent.answer(example, trajectory.evidence)
-    return score_trajectory(example, trajectory, config["reward"])
+    return score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids)
 
 
 def collect_group(config, env, policy, agent, example, step):
@@ -322,7 +322,7 @@ def collect_group(config, env, policy, agent, example, step):
 
     def score(trajectory):
         trajectory.prediction, trajectory.task_input_hash = agent.answer(example, trajectory.evidence)
-        return score_trajectory(example, trajectory, config["reward"])
+        return score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids)
 
     # Only this thread owns the Reader model. Workers access the frozen HTTP
     # Task Agent; no gradients or policy changes occur until all futures finish.
@@ -380,9 +380,10 @@ def metrics(rows):
 
 
 def evaluate_with_policy(config, store, policy, split, output, limit=None):
+    from .prompts import task_input_contract
     validate_directories(config, store, [split])
     env, agent = make_environment(config, store, policy), make_task_agent(config, store)
-    examples = store.examples(split)
+    examples = task_examples(config, store, split)
     if limit is not None:
         examples = examples[:limit]
     rows = []
@@ -398,12 +399,14 @@ def evaluate_with_policy(config, store, policy, split, output, limit=None):
     finally:
         policy.temperature = temperature
     report = metrics(rows)
+    report["task_input_contract"] = task_input_contract()
     atomic_json(Path(output) / "metrics.json", report)
     return report
 
 
 def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index, validation=None):
     import torch
+    from .prompts import task_input_contract
     if validation is not None:
         validation_scores(validation)
     destination = Path(run_dir) / f"checkpoint-{step:08d}"
@@ -412,7 +415,8 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
     policy.model.save_pretrained(temporary / "model", safe_serialization=True)
     policy.tokenizer.save_pretrained(temporary / "model")
     torch.save({"optimizer": optimizer.state_dict(), "step": step, "epoch": epoch, "next_index": next_index,
-                "policy_version": policy.policy_version, "config": config}, temporary / "trainer.pt")
+                "policy_version": policy.policy_version, "config": config,
+                "task_input_contract": task_input_contract()}, temporary / "trainer.pt")
     if validation is not None:
         atomic_json(temporary / "validation_metrics.json", validation)
     temporary.rename(destination)
@@ -421,11 +425,19 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
     return destination
 
 
-def train(config, max_groups=None, resume=None):
+def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False):
+    from .resume import resume_metadata, validate_resume_config
+    if fork_retrieval_resume and not resume:
+        raise ValueError("--fork-retrieval-resume requires --resume")
+    previous = resume_metadata(config, resume, fork_retrieval=fork_retrieval_resume) if resume else None
+    from .runtime_memory import configure_cuda_allocator, memory_settings
+    configure_cuda_allocator()
+    runtime_memory = memory_settings()
     import torch
     from .grpo import CPUAdamW, GRPOUpdater
     from .monitoring import summary_writer_class, write_train_metrics, write_validation_metrics
     from .policy import HFPolicy, load_model, load_tokenizer, model_fingerprint
+    from .prompts import task_input_contract
     if not torch.cuda.is_available() and config["reader"]["device"].startswith("cuda"):
         raise RuntimeError("CUDA is unavailable; unit tests can run on CPU but real model training needs the allocated GPU")
     run_dir = Path(config["training"]["output_dir"])
@@ -441,6 +453,11 @@ def train(config, max_groups=None, resume=None):
     store = open_prepared(config)
     try:
         validate_directories(config, store, ["train", "validation"] if config["training"]["validation_every"] else ["train"])
+        # Validate/restore public context before expensive model loading. Keep
+        # old prepared histories and directory snapshots unchanged.
+        examples = task_examples(config, store, "train")
+        if config["training"]["validation_every"]:
+            task_examples(config, store, "validation")
         model_path = str(Path(resume) / "model") if resume else config["models"]["reader_path"]
         tokenizer = load_tokenizer(model_path)
         model = load_model(model_path, config["reader"]["device"], checkpointing=True)
@@ -448,17 +465,20 @@ def train(config, max_groups=None, resume=None):
         policy = HFPolicy(model, tokenizer, config["reader"])
         optimizer = CPUAdamW(model, config["training"]["learning_rate"], config["training"]["weight_decay"])
         reference = load_model(config["models"]["reader_path"], "cpu").requires_grad_(False) if config["training"]["kl_coefficient"] else None
-        updater = GRPOUpdater(policy, optimizer, config["training"], reference)
+        updater = GRPOUpdater(policy, optimizer, config["training"], reference, runtime_memory=runtime_memory)
         env, agent = make_environment(config, store, policy), make_task_agent(config, store)
         metadata = {"config": config, "reader": model_fingerprint(config["models"]["reader_path"]),
                     "task": model_fingerprint(config["models"]["task_path"]), "directory_version": directory_version(store),
                     "prepare_identity": store.get_metadata("prepare_identity"),
                     "reader_trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad),
-                    "parameterization": "full", "optimizer": "CPUAdamW_fp32_master_and_moments"}
+                    "parameterization": "full", "optimizer": "CPUAdamW_fp32_master_and_moments",
+                    "task_input_contract": task_input_contract(), "runtime_memory": runtime_memory}
         announce("training_execution", **execution_settings(config))
+        announce("training_memory", **runtime_memory)
         step, start_epoch, next_index = 0, 0, 0
         if resume:
-            previous = json.loads((run_dir / "run.json").read_text())
+            if previous.get("runtime_memory") != runtime_memory:
+                announce("resume_memory_changed", previous=previous.get("runtime_memory"), current=runtime_memory)
             for key in ("reader", "task", "directory_version", "prepare_identity"):
                 if previous[key] != metadata[key]:
                     raise ValueError(f"Resume provenance mismatch: {key}")
@@ -466,23 +486,30 @@ def train(config, max_groups=None, resume=None):
             if execution_settings(state["config"]) != execution_settings(config):
                 announce("resume_execution_changed", previous=execution_settings(state["config"]),
                          current=execution_settings(config), note="Sampling batches/RNG streams may change; committed optimizer state is preserved")
-            for key in ("reader", "retrieval", "reward", "training"):
-                # TensorBoard changes monitoring only; old checkpoints may lack this option.
-                ignored = {"tensorboard"} if key == "training" else set()
-                previous_config = {name: value for name, value in state["config"][key].items() if name not in ignored}
-                current_config = {name: value for name, value in config[key].items() if name not in ignored}
-                if previous_config != current_config:
-                    raise ValueError(f"Resume configuration changed: {key}")
+            validate_resume_config(state["config"], config, fork_retrieval=fork_retrieval_resume)
             optimizer.load_state_dict(state["optimizer"])
             step, start_epoch, next_index = state["step"], state["epoch"], state["next_index"]
             policy.policy_version = state["policy_version"]
+            if fork_retrieval_resume:
+                change = {"checkpoint": str(Path(resume).resolve()), "next_step": step + 1,
+                          "previous_retrieval": state["config"]["retrieval"],
+                          "current_retrieval": config["retrieval"],
+                          "optimizer_restored": True, "next_index": next_index,
+                          "note": "Excess IDs execute only the ordered prefix; format penalty remains once per rollout"}
+                metadata["resume_origin"] = change
+                append_json(run_dir / "retrieval_changes.jsonl", change)
+                announce("retrieval_resume_fork", **change)
+            if state.get("task_input_contract") != metadata["task_input_contract"]:
+                change = {"next_step": step + 1, "previous": state.get("task_input_contract"),
+                          "current": metadata["task_input_contract"]}
+                append_json(run_dir / "task_input_changes.jsonl", change)
+                announce("task_input_contract_changed", **change)
             del state
         atomic_json(run_dir / "run.json", metadata)
         if writer_class:
             log_dir = run_dir / "tensorboard"
             writer = writer_class(log_dir=str(log_dir), purge_step=step + 1 if resume else None)
             announce("tensorboard_started", log_dir=str(log_dir), next_step=step + 1)
-        examples = store.examples("train")
         if not examples:
             raise ValueError("No valid training examples")
         completed = 0

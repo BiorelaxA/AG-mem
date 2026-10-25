@@ -1,8 +1,11 @@
 from pathlib import Path
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import httpcore
 import httpx
 
 from agmem.core import Example, InfrastructureError
@@ -28,6 +31,36 @@ class ServiceTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def test_loopback_service_bypasses_inherited_proxy_using_actual_endpoint(self):
+        proxy_env = {name: "http://broken-proxy.invalid:59999" for name in
+                     ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
+        proxy_env.update(NO_PROXY="", no_proxy="")
+        with patch.dict(os.environ, proxy_env), \
+             patch.object(httpcore.HTTPProxy, "handle_request", side_effect=RuntimeError("proxy selected")) as proxy, \
+             patch.object(httpcore.ConnectionPool, "handle_request",
+                          side_effect=lambda request: httpcore.Response(200, content=b"{}")) as direct:
+            for endpoint in ("http://127.0.0.1:50559/v1", "http://127.0.0.2/v1",
+                             "http://localhost:50559/v1", "http://[::1]:50559/v1"):
+                with self.subTest(endpoint=endpoint):
+                    config = {**self.config, "request_base_url": endpoint}
+                    service = ChatService(config, self.store, "task_agent")
+                    try:
+                        self.assertEqual(service.client.get(endpoint + "/models").status_code, 200)
+                    finally:
+                        service.client.close()
+            self.assertEqual(direct.call_count, 4)
+            proxy.assert_not_called()
+            # Routing uses the actual deployment URL, not the cache identity URL.
+            config = {**self.config, "base_url": "http://127.0.0.1/v1",
+                      "request_base_url": "http://remote-service.invalid/v1"}
+            service = ChatService(config, self.store, "task_agent")
+            try:
+                with self.assertRaisesRegex(RuntimeError, "proxy selected"):
+                    service.client.get(config["request_base_url"] + "/models")
+            finally:
+                service.client.close()
+            proxy.assert_called_once()
 
     def test_task_payload_and_deterministic_cache(self):
         requests = []

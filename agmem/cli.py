@@ -24,6 +24,8 @@ def main():
     command = commands.add_parser("train")
     command.add_argument("--max-groups", type=int)
     command.add_argument("--resume")
+    command.add_argument("--fork-retrieval-resume", action="store_true",
+                         help="Resume optimizer/cursor in a fresh output_dir, allowing only max_ids_per_call to change")
     command.add_argument("--output-dir", help="Override training.output_dir; use a fresh directory for a new run")
     command = commands.add_parser("evaluate")
     command.add_argument("--checkpoint", help="Checkpoint's model/ directory; omit for the initial reader baseline")
@@ -63,7 +65,7 @@ def main():
     elif args.command == "train":
         if args.output_dir:
             config["training"]["output_dir"] = args.output_dir
-        pipeline.train(config, args.max_groups, args.resume)
+        pipeline.train(config, args.max_groups, args.resume, fork_retrieval_resume=args.fork_retrieval_resume)
     elif args.command == "evaluate":
         from .policy import HFPolicy, load_model, load_tokenizer
         path = args.checkpoint or config["models"]["reader_path"]
@@ -83,7 +85,7 @@ def main():
             for split in config["data"]["splits"]:
                 path = Path(config["data"]["input_root"]) / source / f"{split}.parquet"
                 file = pq.ParquetFile(path)
-                fields = [name for name in ("question", "answer", "question_id", "all_options", "correct_answer", "incorrect_answers") if name in file.schema_arrow.names]
+                fields = [name for name in ("question", "question_date", "answer", "question_id", "all_options", "correct_answer", "incorrect_answers") if name in file.schema_arrow.names]
                 for index, row in enumerate(pq.read_table(path, columns=fields).to_pylist()):
                     try:
                         example = adapt_row(row, source, split, index)

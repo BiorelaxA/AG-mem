@@ -2,6 +2,6 @@ extends: directory_all.yaml
 data:
   sources: [locomo, split_longmemeval_s]
 jobs:
-  experiment_name: locomo_s_reward_v2
+  experiment_name: locomo_s_reward_v2_time_v1
 training:
-  output_dir: runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/train

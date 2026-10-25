@@ -30,7 +30,7 @@ def outcome(example, prediction: str) -> float:
     return max(text_f1(prediction, reference) for reference in example.gold_answers)
 
 
-def score_trajectory(example, trajectory, config):
+def score_trajectory(example, trajectory, config, *, max_ids=4):
     """Apply one terminal reward, including at most one format penalty."""
     formula = config.get("formula", "outcome_cost_v1")
     if formula not in {"outcome_cost_v1", "outcome_gated_v2"}:
@@ -46,7 +46,7 @@ def score_trajectory(example, trajectory, config):
     # budget is exhausted. A later valid stop does not erase an earlier bad batch.
     trajectory.format_failure = trajectory.termination_reason == "protocol_failure" or any(
         step.action is not None and not step.action["stop"] and (
-            not 1 <= len(step.action["ids"]) <= 10
+            not 1 <= len(step.action["ids"]) <= max_ids
             or len(set(step.action["ids"])) != len(step.action["ids"])
         )
         for step in trajectory.decisions

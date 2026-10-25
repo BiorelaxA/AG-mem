@@ -167,7 +167,7 @@ class ConcurrencyTests(unittest.TestCase):
         keys = [row['id'] for row in directory]
         example = Example('fixture/train/0', 'fixture', 'train', self.memory_id, 'question')
         actions = {
-            100: {'ids': [keys[0]], 'stop': False}, 101: {'ids': ['ignored'], 'stop': True},
+            100: {'ids': keys[:5], 'stop': False}, 101: {'ids': ['ignored'], 'stop': True},
             200: 'not json',
             300: {'ids': ['unknown'], 'stop': False}, 301: {'ids': [keys[1]], 'stop': False},
             302: {'ids': [], 'stop': True},
@@ -186,7 +186,9 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(serial, batched)
         self.assertEqual(batch_sizes, [3, 2, 1])
         self.assertEqual([r['n_read_calls'] for r in batched], [1, 0, 2])
-        self.assertEqual([len(r['evidence']) for r in batched], [1, 0, 1])
+        self.assertEqual([len(r['evidence']) for r in batched], [4, 0, 1])
+        self.assertEqual(batched[0]['decisions'][0]['action']['ids'], keys[:5])
+        self.assertEqual(batched[0]['decisions'][0]['tool_result']['selected_ids'], keys[:4])
 
     def test_group_scoring_concurrent_but_policy_is_fixed_and_order_preserved(self):
         example = Example('fixture/train/0', 'fixture', 'train', self.memory_id, 'q', gold_answers=['yes'])
@@ -211,7 +213,7 @@ class ConcurrencyTests(unittest.TestCase):
             return ('yes' if index % 2 else 'no'), str(index)
         config = {'seed': 42, 'execution': {'reader_batch_size': 2, 'task_agent_workers': 2},
                   'training': {'advantage_epsilon': 1e-6}, 'reward': {'read_call_cost': .01}}
-        env, agent = SimpleNamespace(run_batch=run_batch), SimpleNamespace(answer=answer)
+        env, agent = SimpleNamespace(run_batch=run_batch, max_ids=2), SimpleNamespace(answer=answer)
         group = collect_group(config, env, policy, agent, example, 0)
         self.assertEqual([row.seed for row in group], seeds)
         self.assertEqual([row.task_input_hash for row in group], list(map(str, range(8))))

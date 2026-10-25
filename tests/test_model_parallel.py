@@ -9,6 +9,7 @@ import torch
 from agmem.model_parallel import place_reader_layers, reader_devices
 from agmem.policy import HFPolicy, sequence_logprobs
 from agmem.grpo import CPUAdamW
+from agmem.runtime_memory import activation_offload_context, memory_settings
 from tests.test_qwen_batch import Qwen3_5Config, Qwen3_5ForConditionalGeneration, Tokenizer
 
 
@@ -45,7 +46,7 @@ class LayerPlacementTests(unittest.TestCase):
     def tearDown(self):
         torch.set_num_threads(self.previous_threads)
 
-    def check_placement(self, devices):
+    def check_placement(self, devices, offload=False):
         plain = self.model.to(devices[0])
         split = place_reader_layers(copy.deepcopy(plain).cpu(), devices)
         self.assertEqual(list(plain.state_dict()), list(split.state_dict()))
@@ -64,7 +65,15 @@ class LayerPlacementTests(unittest.TestCase):
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
             model.train()
             for row in results[0]:
-                sequence_logprobs(model, row.prompt_ids, row.token_ids, 1, devices[0]).sum().backward()
+                if offload and model is split:
+                    # On CPU, exercise the saved-tensor/checkpoint hook composition;
+                    # the CUDA variant additionally verifies transfers on both GPUs.
+                    with activation_offload_context(len(row.prompt_ids) + len(row.token_ids) - 1,
+                            "cuda:0", memory_settings({"AGMEM_ACTIVATION_OFFLOAD_MIN_TOKENS": "1"})):
+                        loss = sequence_logprobs(model, row.prompt_ids, row.token_ids, 1, devices[0]).sum()
+                    loss.backward()
+                else:
+                    sequence_logprobs(model, row.prompt_ids, row.token_ids, 1, devices[0]).sum().backward()
         for (name, a), (_, b) in zip(plain.named_parameters(), split.named_parameters()):
             if a.grad is not None:
                 self.assertIsNotNone(b.grad, name)
@@ -85,9 +94,16 @@ class LayerPlacementTests(unittest.TestCase):
     def test_cpu_hooks_cache_backward_optimizer_and_checkpoint(self):
         self.check_placement(["cpu", "cpu"])
 
+    def test_saved_cpu_tensors_with_qwen_checkpoint_recomputation(self):
+        self.check_placement(["cpu", "cpu"], offload=True)
+
     @unittest.skipUnless(torch.cuda.device_count() >= 2, "Requires two allocated CUDA GPUs")
     def test_two_gpu_cache_backward_optimizer_and_checkpoint(self):
         self.check_placement(["cuda:0", "cuda:1"])
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "Requires two allocated CUDA GPUs")
+    def test_two_gpu_offload_backward_optimizer_and_checkpoint(self):
+        self.check_placement(["cuda:0", "cuda:1"], offload=True)
 
 
 if __name__ == "__main__":

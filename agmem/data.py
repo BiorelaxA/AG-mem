@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import json
 import random
@@ -9,6 +9,10 @@ import re
 from .core import Example, canonical, digest, file_digest, seeded_int
 
 ADAPTER_VERSION = "session_choice_v2_empty_sessions"
+# Session/history adaptation is unchanged, so existing Writer directories remain
+# valid. Public task context is versioned separately from history preparation.
+TASK_CONTEXT_VERSION = "question_date_v1"
+LONGMEMEVAL_SOURCES = {"split_longmemeval_s", "split_longmemeval_m"}
 
 
 class InvalidSample(ValueError):
@@ -31,6 +35,12 @@ def option_label(value: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def question_date_observation(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidSample("LongMemEval requires a nonempty question_date")
+    return f"Current date (when the question was asked): {value.strip()}"
+
+
 def labeled_options(options: list[str]) -> dict[str, str]:
     result = {}
     for text in options:
@@ -49,6 +59,8 @@ def adapt_row(row: dict, source: str, split: str, index: int, memory_id: str = "
     if not isinstance(query, str) or not query.strip() or not isinstance(answer, str) or not answer.strip():
         raise InvalidSample("Empty or non-string question/answer")
     example = Example(sample_id, source, split, memory_id, query, gold_answers=[answer])
+    if source in LONGMEMEVAL_SOURCES:
+        example.observation = question_date_observation(row.get("question_date"))
     if source in {"personamem_32k", "personamem_128k"}:
         example.options = labeled_options(decode_list(row["all_options"], "all_options"))
         label = option_label(row.get("correct_answer"))
@@ -83,6 +95,62 @@ def adapt_row(row: dict, source: str, split: str, index: int, memory_id: str = "
         example.gold_answers = [chr(65 + order.index(0))]
         example.answer_mode = "choice"
     return example
+
+
+def task_examples(config, store, split):
+    """Read tasks with public dates, including legacy prepared examples.
+
+    Restore only task context in memory. Do not rewrite live JSONL, memories,
+    directory versions, or Writer caches. Verified scalar Parquet columns are
+    read once per source/split per Store lifetime, without parsing histories.
+    """
+    examples = store.examples(split)
+    sources = {e.source for e in examples} & LONGMEMEVAL_SOURCES
+    if not sources:
+        return examples
+    import pyarrow.parquet as pq
+    root = Path(config["data"]["input_root"])
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    entries = {row["source"]: row for row in manifest["sources"]}
+    identity = store.get_metadata("prepare_identity")
+    cache = getattr(store, "_question_date_rows", None)
+    if cache is None:
+        cache = store._question_date_rows = {}
+    for source in sorted(sources):
+        key = (str(root.resolve()), source, split)
+        if key in cache:
+            continue
+        prepared = identity["datasets"][source] if identity.get("layout") == "by_source" else identity
+        if prepared["input_manifest_sha256"] != file_digest(manifest_path):
+            raise ValueError("Question-date input manifest differs from prepared provenance")
+        path = root / source / f"{split}.parquet"
+        if file_digest(path) != entries[source]["output_files"][split]["sha256"]:
+            raise ValueError(f"Question-date dataset content changed: {path}")
+        file = pq.ParquetFile(path)
+        if "question_date" not in file.schema_arrow.names:
+            raise InvalidSample(f"LongMemEval question_date column missing: {path}")
+        cache[key] = file.read(columns=["question", "answer", "question_date"]).to_pylist()
+    restored = []
+    for example in examples:
+        if example.source not in sources:
+            restored.append(example)
+            continue
+        parts = example.sample_id.split("/")
+        if len(parts) != 3 or parts[:2] != [example.source, split] or not parts[2].isdigit():
+            raise ValueError(f"Cannot map prepared sample to question date: {example.sample_id}")
+        index = int(parts[2])
+        rows = cache[(str(root.resolve()), example.source, split)]
+        if index >= len(rows):
+            raise ValueError(f"Question-date row missing: {example.sample_id}")
+        raw = rows[index]
+        if raw["question"] != example.query or example.gold_answers != [raw["answer"]]:
+            raise ValueError(f"Question-date row does not match prepared example: {example.sample_id}")
+        observation = question_date_observation(raw["question_date"])
+        if example.observation not in ("", observation):
+            raise ValueError(f"Conflicting prepared question-date context: {example.sample_id}")
+        restored.append(replace(example, observation=observation))
+    return restored
 
 
 # Historical annotation and unexpected malformed columns cannot pass this allowlist.

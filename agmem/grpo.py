@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 
 from .policy import sequence_logprobs
+from .runtime_memory import activation_offload_context, memory_settings, use_activation_offload
+from .core import canonical
 
 
 def clipped_loss(new_logprobs, old_logprobs, advantage, reference_logprobs=None, clip_ratio=0.2, beta=0.01):
@@ -61,8 +63,9 @@ class CPUAdamW:
 
 
 class GRPOUpdater:
-    def __init__(self, policy, optimizer, config, reference=None):
+    def __init__(self, policy, optimizer, config, reference=None, runtime_memory=None):
         self.policy, self.optimizer, self.config, self.reference = policy, optimizer, config, reference
+        self.runtime_memory = memory_settings() if runtime_memory is None else runtime_memory
 
     def update(self, group):
         import torch
@@ -73,6 +76,16 @@ class GRPOUpdater:
         for row in group:
             if not row.decisions or not all(len(step.completion.token_ids) == len(step.completion.old_logprobs) > 0 for step in row.decisions):
                 raise ValueError("Missing generation token IDs/behavior logprobs")
+        lengths = [len(step.completion.prompt_ids) + len(step.completion.token_ids) - 1
+                   for row in group for step in row.decisions]
+        offloaded = sum(use_activation_offload(length, self.policy.device, self.runtime_memory) for length in lengths)
+        devices = sorted({parameter.device.index for parameter in self.policy.model.parameters()
+                          if parameter.device.type == "cuda"})
+        for device in devices:
+            torch.cuda.reset_peak_memory_stats(device)
+        print(canonical({"event": "grpo_update_started", "policy_version": self.policy.policy_version,
+                         "decisions": len(lengths), "max_update_input_tokens": max(lengths),
+                         "activation_offload_decisions": offloaded}), flush=True)
         reference_values = {}
         if self.reference is not None:
             self.reference.to(self.policy.device).eval()
@@ -91,19 +104,36 @@ class GRPOUpdater:
             token_count = sum(len(step.completion.token_ids) for step in row.decisions)
             for j, step in enumerate(row.decisions):
                 value = step.completion
-                new = sequence_logprobs(self.policy.model, value.prompt_ids, value.token_ids, self.policy.temperature, self.policy.device)
-                old = torch.tensor(value.old_logprobs, dtype=new.dtype, device=new.device)
-                # Diagnostic only: do not reject a rollout or replace its actual sampling probabilities.
-                error = (new.detach() - old).abs().max().item()
-                max_logprob_error = max(error, max_logprob_error)
-                ref = reference_values[i, j].to(new.device) if (i, j) in reference_values else None
-                loss, kl = clipped_loss(new, old, row.advantage, ref, self.config["clip_ratio"], self.config["kl_coefficient"])
-                scaled = loss.sum() / (8 * token_count)
-                scaled.backward()
+                input_tokens = len(value.prompt_ids) + len(value.token_ids) - 1
+                with activation_offload_context(input_tokens, self.policy.device, self.runtime_memory):
+                    new = sequence_logprobs(self.policy.model, value.prompt_ids, value.token_ids, self.policy.temperature, self.policy.device)
+                    old = torch.tensor(value.old_logprobs, dtype=new.dtype, device=new.device)
+                    # Diagnostic only: preserve actual sampling probabilities.
+                    error = (new.detach() - old).abs().max().item()
+                    max_logprob_error = max(error, max_logprob_error)
+                    ref = reference_values[i, j].to(new.device) if (i, j) in reference_values else None
+                    loss, kl = clipped_loss(new, old, row.advantage, ref, self.config["clip_ratio"], self.config["kl_coefficient"])
+                    scaled = loss.sum() / (8 * token_count)
+                # The saved-tensor hooks belong to this graph and still unpack
+                # on backward; no graph detaching or approximate gradients.
+                try:
+                    scaled.backward()
+                except torch.OutOfMemoryError:
+                    print(canonical({"event": "grpo_backward_oom", "policy_version": self.policy.policy_version,
+                                     "rollout_index": i, "decision_index": j, "input_tokens": input_tokens,
+                                     "activation_offload": use_activation_offload(input_tokens, self.policy.device, self.runtime_memory)}),
+                          flush=True)
+                    raise
                 total_loss += scaled.detach().item()
                 total_kl += kl.detach().sum().item() / (8 * token_count)
+            if offloaded:
+                print(canonical({"event": "grpo_backward_progress", "policy_version": self.policy.policy_version,
+                                 "rollouts_completed": i + 1, "rollouts_total": len(group)}), flush=True)
         norm = torch.nn.utils.clip_grad_norm_(self.policy.model.parameters(), self.config["max_grad_norm"], error_if_nonfinite=True)
         self.optimizer.step()
         self.policy.policy_version += 1
         self.policy.model.eval()
-        return {"loss": total_loss, "sampled_kl": total_kl, "grad_norm": float(norm), "max_old_logprob_error": max_logprob_error}
+        peaks = {f"gpu_{device}_peak_{kind}_gib": getattr(torch.cuda, f"max_memory_{kind}")(device) / 2**30
+                 for device in devices for kind in ("allocated", "reserved")}
+        return {"loss": total_loss, "sampled_kl": total_kl, "grad_norm": float(norm), "max_old_logprob_error": max_logprob_error,
+                "activation_offload_decisions": offloaded, "max_update_input_tokens": max(lengths), **peaks}

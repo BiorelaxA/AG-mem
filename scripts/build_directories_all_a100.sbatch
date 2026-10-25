@@ -3,9 +3,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:a100-pcie-40gb:2
+#SBATCH --gres=gpu:a100-sxm4-80gb:1
 #SBATCH --mem=120G
-#SBATCH --time=96:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=agmem-dirs-all-%j.out
 #SBATCH --error=agmem-dirs-all-%j.err
 

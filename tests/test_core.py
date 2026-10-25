@@ -155,19 +155,79 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result.evidence, [])
         self.assertEqual(result.decisions[0].tool_result["error"]["code"], "context_capacity_exceeded")
 
-    def test_ten_ids_cost_one_call_and_eleven_are_rejected_atomically(self):
+    def test_excess_ids_read_only_prefix_and_keep_original_action_for_reward(self):
         memory_id = self.store.add_memory(clean_history(sample_history(12)))
         entries = self.builder.build(memory_id)
         example = deepcopy(self.example)
         example.memory_id = memory_id
         keys = [entry["id"] for entry in entries]
         stop = {"ids": [], "stop": True}
-        env = MemoryEnvironment(self.store, self.builder.version)
+        env = MemoryEnvironment(self.store, self.builder.version, max_ids=4)
         one = env.run(example, ScriptedPolicy([{"ids": keys[:1], "stop": False}, stop]), 0)
         ten = env.run(example, ScriptedPolicy([{"ids": keys[:10], "stop": False}, stop]), 0)
         eleven = env.run(example, ScriptedPolicy([{"ids": keys[:11], "stop": False}, stop]), 0)
         self.assertEqual([one.n_read_calls, ten.n_read_calls, eleven.n_read_calls], [1, 1, 1])
-        self.assertEqual([len(one.evidence), len(ten.evidence), len(eleven.evidence)], [1, 10, 0])
+        self.assertEqual([len(one.evidence), len(ten.evidence), len(eleven.evidence)], [1, 4, 4])
+        self.assertEqual(ten.decisions[0].action['ids'], keys[:10])
+        self.assertEqual(ten.decisions[0].tool_result['requested_ids'], keys[:10])
+        self.assertEqual(ten.decisions[0].tool_result['selected_ids'], keys[:4])
+        self.assertTrue(ten.decisions[0].tool_result['ids_truncated'])
+        self.assertEqual([row['id'] for row in ten.evidence], keys[:4])
+        config = {'reward': {'formula': 'outcome_gated_v2', 'read_call_cost': 0.01, 'format_penalty': 0.1}}
+        seen = []
+        def answer(example, evidence):
+            seen.append([row['id'] for row in evidence])
+            return 'SECRET_GOLD', 'hash'
+        agent = SimpleNamespace(answer=answer)
+        # Unknown IDs in the discarded suffix cannot reject the valid prefix.
+        action = {'ids': keys[:4] + ['unknown'], 'stop': False}
+        policy = ScriptedPolicy([action, stop])
+        row = scored_rollout(config, env, policy, agent, example, 0)
+        self.assertEqual(seen, [keys[:4]])
+        self.assertEqual(row.format_reward, -0.1)
+        self.assertAlmostEqual(row.reward, 0.89)
+        self.assertEqual(row.decisions[0].action, action)
+        self.assertIn('Select 1 to 4', policy.messages[0][0]['content'])
+        self.assertNotIn('{max_ids}', policy.messages[0][0]['content'])
+        self.assertEqual(set(json.loads(policy.messages[0][1]['content'])),
+                         {'query', 'observation', 'options', 'directory', 'retrieved_evidence'})
+        valid = scored_rollout(config, env, ScriptedPolicy([
+            {'ids': keys[:4], 'stop': False}, stop]), agent, example, 0)
+        self.assertEqual(len(valid.evidence), 4)
+        self.assertFalse(valid.format_failure)
+        self.assertAlmostEqual(valid.reward, 0.99)
+        repeated = scored_rollout(config, env, ScriptedPolicy([
+            action, action, stop]), agent, example, 0)
+        self.assertEqual(repeated.n_read_calls, 2)
+        self.assertEqual(len(repeated.evidence), 4)
+        self.assertEqual(repeated.format_reward, -0.1)
+        self.assertAlmostEqual(repeated.reward, 0.88)
+        # The configured limit, not a hard-coded 4 or 10, also controls scoring.
+        env.max_ids = 3
+        policy = ScriptedPolicy([{'ids': keys[:3], 'stop': False}, stop])
+        row = scored_rollout(config, env, policy, agent, example, 0)
+        self.assertEqual(len(row.evidence), 3)
+        self.assertEqual(row.format_reward, 0)
+        self.assertIn('Select 1 to 3', policy.messages[0][0]['content'])
+
+    def test_truncated_prefix_still_obeys_id_and_context_validation(self):
+        keys = [row['id'] for row in self.directory]
+        stop = {'ids': [], 'stop': True}
+        env = MemoryEnvironment(self.store, self.builder.version, max_ids=2)
+        for prefix, code in [([keys[0], keys[0]], 'duplicate_ids_in_batch'),
+                             ([keys[0], 'unknown'], 'unknown_or_unauthorized_id')]:
+            row = env.run(self.example, ScriptedPolicy([{'ids': prefix + [keys[2]], 'stop': False}, stop]), 0)
+            self.assertEqual(row.evidence, [])
+            self.assertEqual(row.n_read_calls, 1)
+            self.assertTrue(row.decisions[0].tool_result['ids_truncated'])
+            self.assertEqual(row.decisions[0].tool_result['error']['code'], code)
+        def reject(reader, task):
+            self.assertEqual(len(json.loads(reader[1]['content'])['retrieved_evidence']), 2)
+            raise CapacityError('fixture')
+        env.capacity = reject
+        row = env.run(self.example, ScriptedPolicy([{'ids': keys[:3], 'stop': False}, stop]), 0)
+        self.assertEqual(row.evidence, [])
+        self.assertEqual(row.decisions[0].tool_result['error']['code'], 'context_capacity_exceeded')
 
     def test_protocol_and_budget_are_not_synthetic_stops(self):
         env = MemoryEnvironment(self.store, self.builder.version, max_calls=1)

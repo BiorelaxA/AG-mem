@@ -1,6 +1,6 @@
 # AG-Mem
 
-新增独立 A100 入口：`scripts/build_directories_all_a100.sbatch` 申请 2 张 A100 40GB 卡，从 LongMemEval-M 开始为除 LoCoMo/S 外的七个来源构建目录；`scripts/train_eval_locomo_s_a100.sbatch` 申请 4 卡，其中两张分层运行 Reader 全参 GRPO，另外两张部署 27B，负责 LoCoMo/S 的目录、训练和测试。两个任务按来源加锁共享缓存，test 使用独立存储。提交与结果路径见 [独立任务说明](doc/independent_a100_jobs.md)。
+新增独立 A100 入口：`scripts/build_directories_all_a100.sbatch` 申请 1 张 `a100-sxm4-80gb`，单卡部署 27B，从 LongMemEval-M 开始为除 LoCoMo/S 外的七个来源构建目录；`scripts/train_eval_locomo_s_a100.sbatch` 申请 4 张 A100 40GB 卡，其中两张分层运行 Reader 全参 GRPO，另外两张部署 27B，负责 LoCoMo/S 的目录、训练和测试。两个任务按来源加锁共享缓存，test 使用独立存储。提交与结果路径见 [独立任务说明](doc/independent_a100_jobs.md)。
 
 当前首轮实验仅使用 LoCoMo 与 LongMemEval-S；LongMemEval-M 暂缓构建。`configs/pilot.yaml` 保留三种可选数据源，`configs/pilot_workflow.yaml` 独立选择目录构建和训练来源。支持按数据集独立准备、构建和续跑，训练时汇总选定来源，train 与 validation 保持分开。已有集中存储可以迁移复用摘要。操作与共享历史审计见 [按数据集构建说明](doc/dataset_directory_workflow_20261022.md)。
 
@@ -10,7 +10,7 @@ pilot 脚本支持 `AGMEM_STAGE=build|train|all`（默认 all），默认完成 
 
 目录引导的多步记忆检索与 Reader 全参 GRPO。Reader 使用本地 Qwen3.5-4B；冻结的 Qwen3.5-27B 共用一个服务，分别承担离线 Writer 和 Task Agent。
 
-实现遵循当前约定：每个原始 session 一个目录项；Writer 看到当前 session 和前 3 个原始 session，只概括当前 session。Reader 每次选择 1–10 个 ID，读取整份 session 原文，最多 8 次调用并自主停止。一个 GRPO group 对同一问题采样 8 条完整轨迹。
+实现遵循当前约定：每个原始 session 一个目录项；Writer 看到当前 session 和前 3 个原始 session，只概括当前 session。Reader 每次选择 1–4 个 ID，读取整份 session 原文，最多 8 次调用并自主停止。超量选择只尝试读取列表前四个 ID，并计格式惩罚。一个 GRPO group 对同一问题采样 8 条完整轨迹。
 
 ```text
 reward = 2 * outcome_f1 - 1 - 0.01 * outcome_f1 * logical_read_calls - 0.1 * format_failure
@@ -19,9 +19,13 @@ open QA outcome: deterministic answer-text F1
 format_failure: 1 if any Reader format/protocol failure occurs, otherwise 0
 ```
 
-每条完整 rollout 最多扣一次格式惩罚，合法动作不加格式分。JSON/schema 错误，以及继续检索时空批次、超过 10 个或同批重复 ID，均计格式失败；未知 ID、跨批重复与容量拒绝保持原有成本处理。`stop=true` 时忽略 ids 列表内容，直接停止，不新增读取成本或格式惩罚；JSON 字段及类型仍须合法。系数由 `reward.format_penalty` 配置，默认 0.1（smoke 继承），设为 0 可消融。训练和评估共用评分；历史日志不会重新计分。详细边界见 [格式奖励设计](doc/format_reward_20261020.md)。
+每条完整 rollout 最多扣一次格式惩罚，合法动作不加格式分。JSON/schema 错误，以及继续检索时空批次、超过 `retrieval.max_ids_per_call`（默认 4）或同批重复 ID，均计格式失败。超量请求按原列表顺序只尝试读取前 N 个 ID，后续 ID 不读取；前 N 个仍需通过重复、未知 ID 与上下文容量检查，一次请求仅计一次调用。未知 ID、跨批重复与容量拒绝保持原有成本处理。`stop=true` 时忽略 ids 列表内容，直接停止，不新增读取成本或格式惩罚；JSON 字段及类型仍须合法。系数由 `reward.format_penalty` 配置，默认 0.1（smoke 继承），设为 0 可消融。训练和评估共用评分；历史日志不会重新计分。详细边界见 [格式奖励设计](doc/format_reward_20261020.md)。
 
-默认启用 `reward.formula: outcome_gated_v2`；F1=0 时不扣检索成本。`read_cost` 是 F1 加权后的实际扣款，`raw_read_cost` 保留未加权成本。保留最近两个 checkpoint，并保护固定验证集宏平均 reward/F1 各自最佳的 checkpoint；选择记录在 `best_checkpoints.json`。独立 LoCoMo/S 新实验使用 `runs/locomo_longmemeval/experiments/locomo_s_reward_v2/train/`，最终 test 优先使用 validation 最佳 reward 模型。旧运行不回写。详见 [奖励与 checkpoint 更新](doc/reward_outcome_gated_20261024.md)。
+Reader 不展示剩余 token 预算或 session 原文 token 数。超量读取的精简 rollout 额外记录 `ids_truncated`、`selected_ids` 和 `returned_ids`，区分原始动作、被选中执行的前 N 个 ID 与实际成功返回的 ID，不包含检索原文。此次 ID 限制修改不启用 32K 上限或左侧截断；累计上下文仍按原配置检查。旧运行的独立配置快照不会被默认配置覆盖，继续使用其中记录的 ID 上限；修改限制时需同步运行配置，已有目录可复用。
+
+从旧 checkpoint 改变单次 ID 上限并续训时，使用 `train --resume <checkpoint> --fork-retrieval-resume`，配置中的 `training.output_dir` 必须指向新的空目录。该选项保留权重、优化器、step 和数据游标，只允许检索配置中的 `max_ids_per_call` 变化及输出路径变化；reward、Reader 上下文、最大调用次数和训练超参数仍检查一致性。新目录的 `retrieval_changes.jsonl` 记录来源 checkpoint 与切换点，旧日志和验证最佳 checkpoint 不复制；新规则下的最佳模型重新评估。后续从新目录生成的 checkpoint 续跑，使用普通 `--resume`，不再添加 fork 选项。
+
+默认启用 `reward.formula: outcome_gated_v2`；F1=0 时不扣检索成本。`read_cost` 是 F1 加权后的实际扣款，`raw_read_cost` 保留未加权成本。保留最近两个 checkpoint，并保护固定验证集宏平均 reward/F1 各自最佳的 checkpoint；选择记录在 `best_checkpoints.json`。独立 LoCoMo/S 新实验使用 `runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1/train/`（提问日期与时间回答修复后，从初始 Reader 重训并复用目录），最终 test 优先使用 validation 最佳 reward 模型。旧运行不回写。详见 [奖励与 checkpoint 更新](doc/reward_outcome_gated_20261024.md)。
 
 ## 环境
 
@@ -240,6 +244,10 @@ python -m agmem export-tensorboard runs/smoke_session_grpo
 使用原生 PyTorch 多步 GRPO，按每条完整轨迹内的生成 token 平均，再按 8 条轨迹平均；仅 Reader 生成 token（含自然 stop）进入 policy loss，prompt、工具返回、Task Agent 输出都不作生成目标。每个决策单独保存真实 prompt、token IDs、采样时的实际处理后 logits 所对应 logprob，训练时使用相同温度与模板重算带梯度的 logprob。不使用 top-k/top-p 截断或 JSON 约束解码改变行为分布。
 
 默认 `CPUAdamW` 将 FP32 master weights 和 Adam moments 放在 CPU，模型 BF16 参数与梯度在 GPU；这是全参更新。reference policy 平时在 CPU，组内计算 reference logprob 时移入 GPU，计算完移回 CPU。Writer/Task Agent 只有 HTTP 推理调用，不进入优化器。全参更新只会为参与文本计算图的参数产生梯度，未使用的视觉分支没有梯度。
+
+训练入口在导入 PyTorch 前默认设置 `PYTORCH_ALLOC_CONF=expandable_segments:True`，缓解变长输入的显存碎片；如果已有该变量或旧名称 `PYTORCH_CUDA_ALLOC_CONF`，则尊重显式配置。每次策略更新的实际输入长度（prompt + completion 去掉最后一个目标 token）达到 16,384 tokens 时，默认用 `torch.autograd.graph.save_on_cpu(pin_memory=False)` 将反向所需保存张量暂存 CPU，并在反向时恢复到各自原设备。这与非重入梯度检查点组合使用，不截断上下文、不 detach 计算图、不改变 group size 或全参目标。`AGMEM_ACTIVATION_OFFLOAD_MIN_TOKENS` 可调整阈值，`0` 禁用、`1` 对所有 CUDA 更新序列启用；采样和无梯度 reference 计算不启用此卸载。它增加 CPU 内存和传输耗时，仍需实测峰值，不能保证任意长序列不 OOM。
+
+这些内存选项属于运行时设置，不加入冻结的训练超参数，可直接恢复旧 checkpoint。`training_memory` 日志和 `run.json.runtime_memory` 记录设置；`grpo_update_started`、`grpo_backward_progress` 记录长序列更新进度；训练指标新增 `activation_offload_decisions`、`max_update_input_tokens` 和 `gpu_<编号>_peak_allocated_gib` / `gpu_<编号>_peak_reserved_gib`（更新阶段，含 reference 前向与优化器更新）。OOM 仍明确报错，不静默跳过样本或自动改变奖励。
 
 按当前决定，已取消采样 logprob 的一致性阈值检查：采样后不再额外进行 teacher forcing 校验，也不再保存原始 logits 来与 sampling scores 比较。训练必需的带梯度重算保留，采样/重算的最大绝对差只记为 `max_old_logprob_error` 指标，不因差异大小中止。GRPO 比率继续使用实际采样 logprob，不以重算结果覆盖旧概率。变更及历史排查记录见 [logprob 说明](doc/logprob_consistency_20261019.md)。
 

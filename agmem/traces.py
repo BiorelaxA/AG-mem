@@ -23,6 +23,11 @@ def compact_group(group: dict) -> dict:
                         "step": step + 1,
                         "reader_output": decision["completion"]["text"],
                         "action": decision["action"],
+                        **({
+                            "ids_truncated": True,
+                            "selected_ids": decision["tool_result"]["selected_ids"],
+                            "returned_ids": [record["id"] for record in decision["tool_result"]["records"]],
+                        } if (decision.get("tool_result") or {}).get("ids_truncated") else {}),
                     }
                     for step, decision in enumerate(row["decisions"])
                 ],
