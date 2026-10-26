@@ -43,6 +43,48 @@ python -m pip check
 
 换机器运行见 [Git 提交与迁移说明](doc/migration.md)。仓库保存代码、配置和固定划分清单；Parquet 数据、prepared JSONL、模型权重和运行输出不随 Git 提交，需要单独同步或重建。
 
+## 超算四卡部署 Qwen3.5-4B，并复用作业训练
+
+在登录节点的项目根目录提交：
+
+```bash
+sbatch scripts/serve_qwen35_4b.sbatch
+```
+
+[提交脚本](scripts/serve_qwen35_4b.sbatch) 当前申请 `gpu02` 分区单节点、4 张 GPU、16 个 CPU、120G 主机内存、5 天 (`5-00:00:00`)；由调度器选择节点。需要 6 天时可以使用 `sbatch --time=6-00:00:00 scripts/serve_qwen35_4b.sbatch` 覆盖。实际可获批的时限由分区与账户限制决定。[部署脚本](scripts/serve_qwen35_4b.sh) 默认激活 `$HOME/miniconda3` 下的 `agmem` 环境，读取相对项目根目录的 `../model/qwen3.5-4b`，保留 Slurm 分配的 GPU 编号，以 vLLM TP=4、BF16、32768 上下文、纯文本模式启动 `agmem-4b` 服务。
+
+日志和状态保存在 `runs/serve_qwen35_4b_<作业ID>/`：`job.log` 是控制日志，`vllm.log` 是服务日志，`node.txt` 与 `port.txt` 记录节点和端口，`READY` 表示服务健康检查通过。服务仅监听计算节点的 `127.0.0.1`，默认自动选择空闲端口；可在提交时通过 `AGMEM_SERVICE_PORT=8000 sbatch ...` 指定。其他覆盖变量包括 `AGMEM_CONDA_SH`、`AGMEM_CONDA_ENV`、`AGMEM_MODEL_PATH`、`AGMEM_MAX_MODEL_LEN`、`AGMEM_MAX_NUM_SEQS` 和 `AGMEM_GPU_MEMORY_UTILIZATION`。
+
+查看日志，将示例 ID 替换为实际作业 ID：
+
+```bash
+job_id=123456
+squeue -j "$job_id"
+tail -f "runs/serve_qwen35_4b_${job_id}/vllm.log"
+```
+
+准备训练时，在登录节点创建停止服务标记：
+
+```bash
+touch "runs/serve_qwen35_4b_${job_id}/STOP_SERVING"
+tail -f "runs/serve_qwen35_4b_${job_id}/job.log"
+```
+
+看到 `TRAINING_READY` 后按 Ctrl+C 退出 tail；脚本已经停止服务进程组，主作业继续保留资源。使用同一作业进入计算节点（`--overlap` 允许与仍在等待的 batch 步骤共享已分配资源）：
+
+```bash
+srun --jobid="$job_id" --overlap --nodes=1 --ntasks=1 --cpus-per-task=16 --gres=gpu:4 --pty bash
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate agmem
+cd /share/home/wtma/AG-mem
+nvidia-smi
+# 在此运行训练命令；进程可见该作业分配的 4 张 GPU。
+```
+
+模型部署的 TP=4 不会自动让训练代码使用四卡；训练并行方式和 Reader/Task Agent 分卡仍由训练入口配置。退出交互 shell 后主作业继续等待；训练完成后，在登录节点执行 `scancel "$job_id"` 释放整个作业。时限从原作业开始运行时计算，切换训练不会重置计时。
+
+环境缺少 vLLM、GPU 检查失败、服务异常退出或启动超时时，会记录 `SERVICE_FAILED`，清理服务进程后继续保留作业；`ALLOCATION_READY` 表示已进入保留资源状态。此时可直接用上述 `srun --jobid` 进入节点修复环境或运行训练。服务不会自动重启，修好后可在交互 shell 中手动执行 `vllm serve`。服务成功运行时仍通过 `STOP_SERVING` 切换到训练。`scancel` 和作业时限到达都会正常结束作业。脚本尚需实际 GPU 节点验证。
+
 ## 数据
 
 默认入口：[configs/default.yaml](configs/default.yaml)。输入为 `data/processed/query_dedup_val10_seed42_20261018/<source>/{train,validation,test}.parquet`：12244 条 train、90 条 validation、3100 条 test。按来源适配后全局 shuffle，不额外按来源均衡，也不重新去重或划分。
