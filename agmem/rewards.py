@@ -45,6 +45,8 @@ def score_trajectory(example, trajectory, config, *, max_ids=4):
     # Inspect every generated action, including the last decision after the read
     # budget is exhausted. A later valid stop does not erase an earlier bad batch.
     trajectory.format_failure = trajectory.termination_reason == "protocol_failure" or any(
+        step.format_violations for step in trajectory.decisions
+    ) or any(
         step.action is not None and not step.action["stop"] and (
             not 1 <= len(step.action["ids"]) <= max_ids
             or len(set(step.action["ids"])) != len(step.action["ids"])
@@ -63,3 +65,20 @@ def advantages(rewards: list[float], epsilon: float = 1e-6) -> list[float]:
     mean = sum(rewards) / len(rewards)
     std = math.sqrt(sum((value - mean) ** 2 for value in rewards) / len(rewards))
     return [(value - mean) / (std + epsilon) for value in rewards]
+
+
+def protocol_metrics(rows):
+    """Rates are per rollout; decision counts are means per rollout, never rewards."""
+    n = len(rows)
+    reasons = ("invalid_json_or_schema", "empty_ids", "too_many_ids", "duplicate_ids",
+               "repaired_id", "unknown_id", "repeated_invalid_action")
+    return {
+        "id_repair_rate": sum(any((d.tool_result or {}).get("id_repairs") for d in r.decisions) for r in rows) / n,
+        "unknown_id_rate": sum(any((d.tool_result or {}).get("invalid_ids") or
+                                   (d.tool_result or {}).get("error", {}).get("code") == "unknown_or_unauthorized_id"
+                                   for d in r.decisions) for r in rows) / n,
+        "repeated_invalid_action_rate": sum(r.termination_reason == "repeated_invalid_action" for r in rows) / n,
+        "empty_evidence_rate": sum(not r.evidence for r in rows) / n,
+        **{f"format_decisions_{reason}": sum(reason in d.format_violations for r in rows for d in r.decisions) / n
+           for reason in reasons},
+    }

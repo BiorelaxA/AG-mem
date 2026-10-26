@@ -422,3 +422,7 @@ hf download 你的用户名/agmem-data \
 随后按 环境安装说明 (doc/environment\_setup.md) 创建环境，并准备两个完整模型目录。
 
 如果继续使用 `scripts/train.sbatch`，需要核对目标机器的 **模型路径、conda 路径及 Slurm 资源名称**。该脚本读取 `configs/full.yaml`，继承 `configs/default.yaml`，**不会自动读取 `configs/local.yaml`**&#65307;目标机器的模型路径可以覆盖写在 `configs/full.yaml` 中。首次提交后，脚本会重新执行 `prepare → build-directories → train`。
+
+### Reader ID 修复协议与 checkpoint 100 续跑
+
+2026-10-26 新实验使用 `configs/resume_locomo_s_idrepair.yaml`，显式启用 `repair_v2`。有限补零修复、保留同批有效记录、重复无效调用终止均保留原始采样文本；协议违规每条 rollout 最多扣 0.1。旧配置缺省仍为 `strict_v1`。新分支恢复模型和优化器，并先评估新协议下的 step 100 基线，再从 step 101 继续。执行命令、审计字段及后续续跑说明见 [Reader ID 协议 v2](doc/reader_id_protocol_v2.md)。

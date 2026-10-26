@@ -1,0 +1,71 @@
+seed: 42
+execution:
+  writer_workers: 2
+  task_agent_workers: 2
+  reader_batch_size: 2
+  reader_batch_max_tokens: 16384
+data:
+  input_root: /home/hongyshen/AG-Mem/data/processed/query_dedup_val10_seed42_20261018
+  prepared_root: /home/hongyshen/AG-Mem/runs/locomo_longmemeval/prepared
+  sources:
+  - locomo
+  - split_longmemeval_s
+  splits:
+  - train
+  - validation
+  layout: by_source
+models:
+  reader_path: /home/share/models/Qwen3.5-4B
+  task_path: /home/share/models/Qwen3.5-27B
+memory:
+  record_unit: session
+service:
+  base_url: http://127.0.0.1:50543/v1
+  model: agmem-27b
+  api_key_env: AGMEM_API_KEY
+  timeout_seconds: 600
+  retries: 2
+  request_base_url: http://127.0.0.1:50559/v1
+writer:
+  lookback_sessions: 3
+  content_max_tokens: 300
+reader:
+  device: cuda:0
+  max_context_tokens: null
+  max_new_tokens_per_decision: 256
+  rollout_temperature: 1.0
+  rollout_use_cache: true
+retrieval:
+  max_ids_per_call: 4
+  max_read_calls: 8
+  id_protocol: repair_v2
+task_agent:
+  max_output_tokens: 512
+  max_context_tokens: 65536
+reward:
+  formula: outcome_gated_v2
+  read_call_cost: 0.01
+  format_penalty: 0.1
+  choice_outcome: label_f1
+  text_outcome: qa_f1_v1
+training:
+  parameterization: full
+  group_size: 8
+  optimizer: cpu_adamw_fp32
+  learning_rate: 1.0e-06
+  weight_decay: 0.0
+  epochs: 1
+  advantage_epsilon: 1.0e-06
+  clip_ratio: 0.2
+  kl_coefficient: 0.01
+  max_grad_norm: 1.0
+  group_infrastructure_retries: 1
+  validation_every: 25
+  checkpoint_every: 1
+  keep_last_checkpoints: 2
+  tensorboard: true
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_reward_v2_time_v1_ids4_idrepair_v2/train
+jobs:
+  test_prepared_root: /home/hongyshen/AG-Mem/runs/locomo_longmemeval/prepared_test
+  legacy_prepared_root: /home/hongyshen/AG-Mem/runs/slurm_full_train/prepared
+  experiment_name: locomo_s_reward_v2_time_v1_ids4_idrepair_v2

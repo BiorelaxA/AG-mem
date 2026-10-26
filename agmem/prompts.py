@@ -67,11 +67,16 @@ def task_input_contract():
     return {"task_context_version": TASK_CONTEXT_VERSION, "task_prompt_sha256": digest(TASK_SYSTEM)}
 
 
-def reader_messages(example: Example, directory: list[dict], evidence: list[dict], error=None, *, max_ids=4):
+def reader_messages(example: Example, directory: list[dict], evidence: list[dict], error=None, *, max_ids=4, id_protocol="strict_v1"):
     state = {**example.public_task(), "directory": directory, "retrieved_evidence": evidence}
     if error:
         state["last_tool_error"] = error
     system = READER_SYSTEM.replace("{max_ids}", str(max_ids))
+    if id_protocol == "repair_v2":
+        system += ("\nCopy IDs exactly from this directory, including all leading zeros and the hash. "
+                   "Invalid or repaired IDs incur a format penalty; valid IDs in the same call are still read. "
+                   "After an invalid-ID error, correct the IDs using the directory. Repeating the same "
+                   "invalid IDs without adding evidence ends retrieval.")
     return [{"role": "system", "content": system}, {"role": "user", "content": canonical(state)}]
 
 

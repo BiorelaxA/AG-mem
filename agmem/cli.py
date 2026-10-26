@@ -26,6 +26,10 @@ def main():
     command.add_argument("--resume")
     command.add_argument("--fork-retrieval-resume", action="store_true",
                          help="Resume optimizer/cursor in a fresh output_dir, allowing only max_ids_per_call to change")
+    command.add_argument("--fork-id-protocol-resume", action="store_true",
+                         help="Resume optimizer/cursor in a fresh output_dir with repair_v2 ID execution and penalties")
+    command.add_argument("--validate-before-training", action="store_true",
+                         help="Evaluate and save the restored checkpoint under the current protocol before updating")
     command.add_argument("--output-dir", help="Override training.output_dir; use a fresh directory for a new run")
     command = commands.add_parser("evaluate")
     command.add_argument("--checkpoint", help="Checkpoint's model/ directory; omit for the initial reader baseline")
@@ -65,7 +69,9 @@ def main():
     elif args.command == "train":
         if args.output_dir:
             config["training"]["output_dir"] = args.output_dir
-        pipeline.train(config, args.max_groups, args.resume, fork_retrieval_resume=args.fork_retrieval_resume)
+        pipeline.train(config, args.max_groups, args.resume, fork_retrieval_resume=args.fork_retrieval_resume,
+                       fork_id_protocol_resume=args.fork_id_protocol_resume,
+                       validate_before_training=args.validate_before_training)
     elif args.command == "evaluate":
         from .policy import HFPolicy, load_model, load_tokenizer
         path = args.checkpoint or config["models"]["reader_path"]

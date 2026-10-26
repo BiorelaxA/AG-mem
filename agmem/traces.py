@@ -23,6 +23,15 @@ def compact_group(group: dict) -> dict:
                         "step": step + 1,
                         "reader_output": decision["completion"]["text"],
                         "action": decision["action"],
+                        **({"format_violations": decision["format_violations"]}
+                           if decision.get("format_violations") else {}),
+                        **({
+                            "id_repairs": decision["tool_result"]["id_repairs"],
+                            "invalid_ids": decision["tool_result"]["invalid_ids"],
+                            "selected_ids": decision["tool_result"]["selected_ids"],
+                            "returned_ids": [r["id"] for r in decision["tool_result"]["records"]],
+                            "tool_error": decision["tool_result"].get("error"),
+                        } if "id_repairs" in (decision.get("tool_result") or {}) else {}),
                         **({
                             "ids_truncated": True,
                             "selected_ids": decision["tool_result"]["selected_ids"],
