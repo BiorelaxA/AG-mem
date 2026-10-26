@@ -1,0 +1,26 @@
+{
+  "status": "complete",
+  "identity": {
+    "input_manifest_sha256": "b2f60f2dd68b5ab1504e3cecaddbb4bb19300c8c9ed741bd25267eb63fc2c34c",
+    "sources": [
+      "split_longmemeval_s"
+    ],
+    "splits": [
+      "train",
+      "validation"
+    ],
+    "limit_per_source_split": null,
+    "adapter_version": "session_choice_v2_empty_sessions",
+    "storage_format": "trajectory_jsonl_v1"
+  },
+  "counts": {
+    "split_longmemeval_s/train/input": 340,
+    "split_longmemeval_s/train/valid": 340,
+    "split_longmemeval_s/validation/input": 10,
+    "split_longmemeval_s/validation/valid": 10
+  },
+  "issues": [],
+  "memories": 350,
+  "sessions": 16704,
+  "elapsed_seconds": 13.378662918228656
+}

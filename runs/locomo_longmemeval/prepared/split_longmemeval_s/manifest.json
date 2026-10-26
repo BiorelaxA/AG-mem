@@ -1,0 +1,27 @@
+{
+  "storage_format": "trajectory_jsonl_v1",
+  "prepare_identity": {
+    "input_manifest_sha256": "b2f60f2dd68b5ab1504e3cecaddbb4bb19300c8c9ed741bd25267eb63fc2c34c",
+    "sources": [
+      "split_longmemeval_s"
+    ],
+    "splits": [
+      "train",
+      "validation"
+    ],
+    "limit_per_source_split": null,
+    "adapter_version": "session_choice_v2_empty_sessions",
+    "storage_format": "trajectory_jsonl_v1"
+  },
+  "prepare_complete": true,
+  "directory_version": "9fe3e3609f217f63a4b79c6d1d64e026f9e8431402ebd38253a7dca6ceeff6d1",
+  "directory_service_identity": {
+    "base_url": "http://127.0.0.1:50543/v1",
+    "model": "agmem-27b",
+    "api_key_env": "AGMEM_API_KEY",
+    "timeout_seconds": 600,
+    "retries": 2,
+    "model_revision": "8ef2a32839483abaa34bb2247baa620fc4261069d18f738fe88634ebcc9d5520"
+  },
+  "directory_empty_pending": 0
+}
