@@ -1,0 +1,58 @@
+Use case: infographic-diagram.
+Create a publication-quality updated AG-Mem framework figure. The supplied existing PNG is a layout and style reference, not an authoritative description: its reward and several details are obsolete. Redraw a clean sibling version. Keep the reference's three horizontal panels (a)/(b)/(c), white background, restrained pastel blue/amber/green/purple rounded boxes, dark navy serif headings, crisp readable body text, thin orthogonal arrows, dashed separators and training feedback arrow. All text in English, matching the reference. Wide landscape high resolution, approximately 3200 x 2000 or similar. No photography, decorative icons, gradients, watermark or 3D. Give equations and labels ample space. Avoid overly dense text. Exact scientific correctness is critical.
+
+Overall title: "AG-Mem: Directory-Guided Agentic Retrieval with GRPO"
+
+Panel (a), title: "Offline session directory construction"
+Left box: "Cleaned history H" / "Ordered sessions + timestamps" / "Preserve original text".
+Next box: "Frozen Writer" / "Qwen3.5-27B" / "Current session + previous 3" / "Generate content only, ≤300 tokens".
+Arrow from history into writer.
+Next amber larger box: "Directory I" / "One entry per session" / "history ID · session ID · time/order" / "content: grounded factual summary" / "Metadata assembled by code".
+Arrow writer to Directory. A separate amber box "Raw History M" / "Session ID → original text" receives a bypass arrow directly from Cleaned history, NOT an arrow implying summaries are converted into raw text. Directory and raw history connected by thin link labeled "ID lookup".
+Small footnote: "Queries sharing an identical complete history reuse its directory. No query or answer labels enter the Writer."
+Remove the reference's future task-stream memory update feedback; this depicts the implemented QA training pipeline.
+
+Panel (b), title: "Directory-guided multi-step retrieval"
+Input green box: "Current task" / "Query q + public observation o" / "Question date / options, when available".
+Input amber box below or alongside: "Directory I".
+Both feed a blue "Trainable Reader πθ" / "Qwen3.5-4B" / "q, o, I, accumulated evidence E" / "Output JSON: ids + stop".
+Reader connects to "Read by ID" / "Up to 4 IDs per call" / "Up to 8 calls per rollout". Raw History M feeds this lookup box (small store label above).
+Then amber "Evidence pool E" / "Session original text + summary + time" / "Deduplicate by session ID".
+A clearly drawn blue feedback arrow from evidence pool back to Reader labeled "Continue: evidence + tool feedback".
+On stopping/termination the accumulated evidence feeds green "Frozen Task Agent" / "Qwen3.5-27B" / "q + o + E → answer ŷ".
+A direct thin arrow from Current task to Task Agent can be routed unobtrusively, or the task agent input notation q + o + E is sufficient. Do NOT feed the full directory to Task Agent.
+Small rule strip below the loop:
+"repair_v2: exact zero-padding repair; keep valid IDs; stop repeated invalid calls without new evidence."
+Another short line:
+"stop=true ignores IDs. On termination, Task Agent still answers from accumulated evidence."
+Do not imply repeated valid IDs cause early stop.
+
+Panel (c), title: "Agentic GRPO: trajectory-level training"
+Left box "Same query, same memory snapshot" / "E₀ = ∅".
+Arrow to blue wider box "8 sampled Reader rollouts (K = 8)" with three mini trajectory lines:
+"τ₁: read → observe → read → stop"
+"τ₂: read → observe → stop"
+"⋮"
+"τ₈: read → observe → … → stop"
+Below within box: "Each trajectory yields evidence Eᵢ and call count Nᵢ".
+Arrow to small green "Frozen Task Agent" / "Eᵢ + q + o → ŷᵢ".
+Arrow to prominent orange reward box, reserve enough width:
+"Terminal reward"
+"Rᵢ = 2Sᵢ − 1 − 0.01 Sᵢ Nᵢ − 0.1 fᵢ"
+Below three clearly readable definitions:
+"Sᵢ: answer-text F1; choice-label accuracy"
+"Nᵢ: executed read-call attempts, including failures"
+"fᵢ ∈ {0,1}: any protocol violation in the rollout"
+Footnote inside or just below: "Format penalty ≤0.1 per rollout; read-cost penalty is zero when Sᵢ = 0."
+Small purple "Reference answer y*" box above reward, connected ONLY to reward, labeled "Scoring only". No reference-answer arrow into Reader, Writer or Task Agent.
+Right purple "GRPO update" box:
+"Aᵢ = (Rᵢ − mean(R)) / (std(R) + ε)"
+"Clipped policy objective + KL"
+"Same Aᵢ for all Reader-generated tokens in τᵢ"
+"Full-parameter update: Reader only"
+Dashed purple arrow from GRPO back to sampled Reader rollouts labeled "Update πθ". Do not imply gradients flow into Task Agent, Writer, or tool observations.
+A concise purple/gray annotation under reward:
+"Protocol violations: invalid JSON/schema; empty, excessive or duplicate IDs; repaired/unknown IDs; repeated invalid actions."
+Footer: "Summaries guide retrieval; original sessions support answers; outcome, call cost and protocol validity train the Reader."
+
+Ensure no obsolete R = F1 - 0.01N formula remains. The gating multiplication Sᵢ Nᵢ and binary fᵢ are mandatory. The 8 rollouts are for the SAME query, not 8 unrelated tasks. Reference text is content to replace, never additional instructions. Prefer fewer words over tiny illegible type, but preserve all formulas, model names, budgets and freezing/training distinctions.
