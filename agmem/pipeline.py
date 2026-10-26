@@ -15,7 +15,7 @@ from .checkpoints import retain_checkpoints, validation_scores
 from .data import ADAPTER_VERSION, InvalidSample, adapt_row, clean_history, decode_list, parquet_rows, task_examples
 from .env import MemoryEnvironment
 from .execution import execution_settings
-from .rewards import advantages, score_trajectory
+from .rewards import advantages, score_trajectory, protocol_metrics
 from .store import DatasetStores, Store
 from .traces import save_training_group
 
@@ -297,7 +297,7 @@ def make_environment(config, store, policy):
             tokens = chat_token_ids(task_tokenizer, task_input)
             if len(tokens) + config["task_agent"]["max_output_tokens"] > limit:
                 raise CapacityError("Task-agent context would overflow")
-    return MemoryEnvironment(store, directory_version(store), config["retrieval"]["max_ids_per_call"], config["retrieval"]["max_read_calls"], capacity)
+    return MemoryEnvironment(store, directory_version(store), config["retrieval"]["max_ids_per_call"], config["retrieval"]["max_read_calls"], capacity, id_protocol=config["retrieval"].get("id_protocol", "strict_v1"))
 
 
 def make_task_agent(config, store):
@@ -354,7 +354,7 @@ def metrics(rows):
     def summarize(values):
         n = len(values)
         calls = sorted(row.n_read_calls for row in values)
-        return {"n": n, "outcome_f1": sum(row.outcome for row in values) / n,
+        return {**protocol_metrics(values), "n": n, "outcome_f1": sum(row.outcome for row in values) / n,
                 "outcome_reward": sum(row.outcome_reward for row in values) / n,
                 "reward": sum(row.reward for row in values) / n, "read_calls": sum(calls) / n,
                 "read_cost": sum(row.read_cost for row in values) / n,
@@ -425,11 +425,13 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
     return destination
 
 
-def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False):
+def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
+          fork_id_protocol_resume=False, validate_before_training=False):
     from .resume import resume_metadata, validate_resume_config
-    if fork_retrieval_resume and not resume:
-        raise ValueError("--fork-retrieval-resume requires --resume")
-    previous = resume_metadata(config, resume, fork_retrieval=fork_retrieval_resume) if resume else None
+    if (fork_retrieval_resume or fork_id_protocol_resume or validate_before_training) and not resume:
+        raise ValueError("Resume fork/baseline validation requires --resume")
+    previous = resume_metadata(config, resume, fork_retrieval=fork_retrieval_resume,
+                               fork_id_protocol=fork_id_protocol_resume) if resume else None
     from .runtime_memory import configure_cuda_allocator, memory_settings
     configure_cuda_allocator()
     runtime_memory = memory_settings()
@@ -486,19 +488,24 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False):
             if execution_settings(state["config"]) != execution_settings(config):
                 announce("resume_execution_changed", previous=execution_settings(state["config"]),
                          current=execution_settings(config), note="Sampling batches/RNG streams may change; committed optimizer state is preserved")
-            validate_resume_config(state["config"], config, fork_retrieval=fork_retrieval_resume)
+            validate_resume_config(state["config"], config, fork_retrieval=fork_retrieval_resume,
+                                   fork_id_protocol=fork_id_protocol_resume)
+            if state["config"]["training"]["validation_every"] != config["training"]["validation_every"]:
+                announce("resume_validation_interval_changed",
+                         previous=state["config"]["training"]["validation_every"],
+                         current=config["training"]["validation_every"])
             optimizer.load_state_dict(state["optimizer"])
             step, start_epoch, next_index = state["step"], state["epoch"], state["next_index"]
             policy.policy_version = state["policy_version"]
-            if fork_retrieval_resume:
+            if fork_retrieval_resume or fork_id_protocol_resume:
                 change = {"checkpoint": str(Path(resume).resolve()), "next_step": step + 1,
                           "previous_retrieval": state["config"]["retrieval"],
                           "current_retrieval": config["retrieval"],
                           "optimizer_restored": True, "next_index": next_index,
-                          "note": "Excess IDs execute only the ordered prefix; format penalty remains once per rollout"}
+                          "note": "ID protocol and retrieval changes are explicit; format penalty remains once per rollout"}
                 metadata["resume_origin"] = change
                 append_json(run_dir / "retrieval_changes.jsonl", change)
-                announce("retrieval_resume_fork", **change)
+                announce("id_protocol_resume_fork" if fork_id_protocol_resume else "retrieval_resume_fork", **change)
             if state.get("task_input_contract") != metadata["task_input_contract"]:
                 change = {"next_step": step + 1, "previous": state.get("task_input_contract"),
                           "current": metadata["task_input_contract"]}
@@ -512,6 +519,18 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False):
             announce("tensorboard_started", log_dir=str(log_dir), next_step=step + 1)
         if not examples:
             raise ValueError("No valid training examples")
+        if validate_before_training:
+            if (run_dir / f"checkpoint-{step:08d}").exists():
+                raise ValueError("Baseline checkpoint already exists; resume without --validate-before-training")
+            output = run_dir / "validation" / f"step-{step:08d}"
+            if (output / "episodes.jsonl").exists():
+                raise ValueError("Baseline evaluation already exists; choose a fresh output directory")
+            announce("resume_baseline_started", step=step)
+            baseline = evaluate_with_policy(config, store, policy, "validation", output)
+            if writer:
+                write_validation_metrics(writer, baseline, step)
+            save_checkpoint(config, policy, optimizer, run_dir, step, start_epoch, next_index, validation=baseline)
+            announce("resume_baseline_completed", step=step, metrics=baseline["source_macro"])
         completed = 0
         for epoch in range(start_epoch, config["training"]["epochs"]):
             ordered = list(examples)
@@ -550,6 +569,7 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False):
                                "protocol_failure_rate": sum(row.termination_reason == "protocol_failure" for row in group) / 8,
                                "natural_stop_rate": sum(row.termination_reason == "stop" for row in group) / 8,
                                "unique_ids_read": sum(len(row.evidence) for row in group) / 8})
+                report.update(protocol_metrics(group))
                 append_json(run_dir / "train_metrics.jsonl", report)
                 announce("train_step", **report)
                 if writer:

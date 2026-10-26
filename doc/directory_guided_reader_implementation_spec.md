@@ -1,5 +1,7 @@
 # 目录引导的 Agentic Memory Reader：方法与代码实现规格
 
+2026-10-26 增补：显式 `retrieval.id_protocol: repair_v2` 使用有限 ID 补零修复、部分有效读取与重复无效调用终止，并扩展二值 format 惩罚。旧 `strict_v1` 规则保持不变；新版细则及 checkpoint 100 续跑见 [Reader ID 协议 v2](reader_id_protocol_v2.md)。
+
 版本：v1.27；日期：2026-10-25。
 
 v1.27 修改：Reader 每次默认最多选择 4 个 ID；超量且 stop=false 时仅尝试读取列表前 N 个，后续 ID 不读取，原始动作仍计一次 rollout 格式惩罚。环境、prompt 与评分统一读取 retrieval.max_ids_per_call；不向 Reader 展示剩余 token 预算或 session 原文 token 数。不启用输入截断或新的上下文上限，已有容量检查保持不变。

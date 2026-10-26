@@ -78,6 +78,7 @@ class Decision:
     action: dict | None = None
     tool_result: dict | None = None
     state_sha256: str = ""
+    format_violations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -143,6 +144,8 @@ def load_config(path: str | Path) -> dict:
     if value["memory"]["record_unit"] != "session" or value["writer"]["lookback_sessions"] < 3:
         raise ValueError("Use one entry per session and at least three preceding sessions")
     max_ids = value["retrieval"]["max_ids_per_call"]
+    if value["retrieval"].get("id_protocol", "strict_v1") not in {"strict_v1", "repair_v2"}:
+        raise ValueError("Unknown retrieval.id_protocol")
     if type(max_ids) is not int or max_ids < 1:
         raise ValueError("retrieval.max_ids_per_call must be a positive integer")
     if value["reward"]["read_call_cost"] != 0.01:

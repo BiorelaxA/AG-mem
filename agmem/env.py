@@ -23,11 +23,14 @@ def parse_action(text: str) -> dict:
 
 
 class MemoryEnvironment:
-    def __init__(self, store, directory_version: str, max_ids=4, max_calls=8, capacity=None):
+    def __init__(self, store, directory_version: str, max_ids=4, max_calls=8, capacity=None, id_protocol="strict_v1"):
         if type(max_ids) is not int or max_ids < 1:
             raise ValueError("max_ids must be a positive integer")
         self.store, self.version = store, directory_version
         self.max_ids, self.max_calls, self.capacity = max_ids, max_calls, capacity
+        if id_protocol not in {"strict_v1", "repair_v2"}:
+            raise ValueError("Unknown retrieval.id_protocol")
+        self.id_protocol = id_protocol
 
     def run(self, example, policy, seed: int, policy_version=0):
         episode = self._episode(example, seed, policy_version)
@@ -73,8 +76,9 @@ class MemoryEnvironment:
             raise ValueError("Directory does not align with the immutable memory snapshot")
         trajectory = Trajectory(example.sample_id, seed, example.memory_id, policy_version)
         evidence, error = {}, None
+        previous_invalid = None
         for decision_index in range(self.max_calls + 1):
-            messages = reader_messages(example, directory, list(evidence.values()), error, max_ids=self.max_ids)
+            messages = reader_messages(example, directory, list(evidence.values()), error, max_ids=self.max_ids, id_protocol=self.id_protocol)
             completion = yield messages, seed + decision_index
             decision = Decision(messages, completion, state_sha256=digest(messages))
             trajectory.decisions.append(decision)
@@ -82,11 +86,73 @@ class MemoryEnvironment:
                 action = parse_action(completion.text)
                 decision.action = action
             except (ValueError, TypeError):
+                decision.format_violations.append("invalid_json_or_schema")
                 trajectory.termination_reason = "protocol_failure"
                 break
             if action["stop"]:
                 trajectory.termination_reason = "stop"
                 break
+            if self.id_protocol == "repair_v2":
+                requested = action["ids"]
+                if not requested:
+                    decision.format_violations.append("empty_ids")
+                if len(requested) > self.max_ids:
+                    decision.format_violations.append("too_many_ids")
+                if len(set(requested)) != len(requested):
+                    decision.format_violations.append("duplicate_ids")
+                ids, repairs, invalid = resolve_ids(requested[:self.max_ids], references)
+                if repairs:
+                    decision.format_violations.append("repaired_id")
+                if invalid:
+                    decision.format_violations.append("unknown_id")
+                if len(ids) != len(set(ids)) and "duplicate_ids" not in decision.format_violations:
+                    decision.format_violations.append("duplicate_ids")
+                # Inspect even the final over-budget decision, but never execute it.
+                if trajectory.n_read_calls >= self.max_calls:
+                    trajectory.termination_reason = "max_read_calls"
+                    break
+                trajectory.n_read_calls += 1
+                ids = list(dict.fromkeys(ids))
+                records = []
+                for key in ids:
+                    original = self.store.record(references[key])
+                    records.append({k: original[k] for k in ("id", "source_session_id", "time", "order", "raw_text")} | {"content": entries[key]["content"]})
+                before = set(evidence)
+                capacity_error = False
+                if records:
+                    candidate = {**evidence, **{row["id"]: row for row in records}}
+                    try:
+                        if self.capacity:
+                            self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids, id_protocol=self.id_protocol), task_messages(example, list(candidate.values())))
+                    except CapacityError:
+                        capacity_error = True
+                        records = []
+                    else:
+                        evidence = candidate
+                error = None
+                if invalid:
+                    error = {"code": "unknown_or_unauthorized_id", "invalid_ids": invalid,
+                             "message": "Copy valid IDs exactly from the current directory; keep all leading zeros and hashes."}
+                elif not requested:
+                    error = {"code": "invalid_batch_size"}
+                elif capacity_error:
+                    error = {"code": "context_capacity_exceeded"}
+                if error is not None and capacity_error:
+                    error["capacity_rejected"] = True
+                decision.tool_result = {"ok": error is None, "requested_ids": requested,
+                                        "selected_ids": ids, "records": records,
+                                        "id_repairs": repairs, "invalid_ids": invalid}
+                if error is not None:
+                    decision.tool_result["error"] = error
+                if len(requested) > self.max_ids:
+                    decision.tool_result["ids_truncated"] = True
+                signature = tuple(sorted(set(invalid))) if invalid else None
+                if signature is not None and signature == previous_invalid and set(evidence) == before:
+                    decision.format_violations.append("repeated_invalid_action")
+                    trajectory.termination_reason = "repeated_invalid_action"
+                    break
+                previous_invalid = signature
+                continue
             if trajectory.n_read_calls >= self.max_calls:
                 trajectory.termination_reason = "max_read_calls"
                 break
@@ -110,7 +176,7 @@ class MemoryEnvironment:
                 candidate = {**evidence, **{row["id"]: row for row in records}}
                 try:
                     if self.capacity:
-                        self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids), task_messages(example, list(candidate.values())))
+                        self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids, id_protocol=self.id_protocol), task_messages(example, list(candidate.values())))
                 except CapacityError:
                     code = "context_capacity_exceeded"
             if code is not None:
@@ -126,3 +192,29 @@ class MemoryEnvironment:
             trajectory.termination_reason = "max_decisions"
         trajectory.evidence = list(evidence.values())
         return trajectory
+
+
+def resolve_ids(ids, references):
+    """Only normalize omitted leading zeros; never guess hashes or cross histories."""
+    resolved, repairs, invalid = [], [], []
+    for key in ids:
+        if key in references:
+            resolved.append(key)
+            continue
+        match = re.fullmatch(r"r_([0-9]{1,5})_([0-9a-f]{12})", key)
+        candidates = []
+        if match:
+            number, suffix = match.groups()
+            # Require a unique directory match, not just a constructed spelling.
+            candidates = [known for known in references
+                          if (m := re.fullmatch(r"r_([0-9]+)_([0-9a-f]{12})", known))
+                          and int(m[1]) == int(number) and m[2] == suffix]
+            canonical = f"r_{int(number):05d}_{suffix}"
+            if candidates != [canonical] or len(number) >= 5:
+                candidates = []
+        if len(candidates) == 1:
+            resolved.append(candidates[0])
+            repairs.append({"requested_id": key, "resolved_id": candidates[0]})
+        else:
+            invalid.append(key)
+    return resolved, repairs, invalid
