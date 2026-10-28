@@ -16,8 +16,9 @@ def committed_checkpoints(run_dir):
 
 def validation_scores(report):
     # Equal weight per dataset, irrespective of its number of validation queries.
-    scores = {"best_reward": report["source_macro"]["reward"],
-              "best_outcome": report["source_macro"]["outcome_f1"]}
+    macro = report["source_macro"]
+    scores = {"best_reward": macro["reward"],
+              "best_outcome": macro["judge_accuracy"] if "judge_accuracy" in macro else macro["outcome_f1"]}
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
            for v in scores.values()):
         raise ValueError("Checkpoint selection requires finite validation scores")

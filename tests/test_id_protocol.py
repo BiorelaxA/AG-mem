@@ -22,7 +22,7 @@ class IDProtocolTests(unittest.TestCase):
                                      max_calls=max_calls, capacity=capacity, id_protocol='repair_v2')
         self.policy = ScriptedPolicy(actions)
         self.seen = []
-        def answer(example, evidence):
+        def answer(example, evidence, *, metadata=None):
             self.seen.append(deepcopy(evidence))
             return ('SECRET_GOLD' if correct else 'wrong'), 'hash'
         return scored_rollout({'reward': {'formula': 'outcome_gated_v2', 'read_call_cost': .01,

@@ -1,0 +1,42 @@
+extends: train_locomo_s_4x80gb.yaml
+# Legacy v1 recipe. The four_gpu default is now train_dapo_locomo_s_v2.yaml.
+# Same Reader / Writer / Task Agent prompts and the same verified frozen directories.
+# mini_batch_groups=1 is eight rollouts accumulated into one optimizer update.
+execution:
+  reader_batch_size: 1
+reward:
+  formula: judge_gated_v1
+  text_outcome: llm_judge
+  judge:
+    protocols:
+      locomo: locomo_refined
+      split_longmemeval_s: longmemeval_official
+      split_longmemeval_m: longmemeval_official
+    max_output_tokens: 128
+    seed: 42
+  likelihood:
+    mode: "off"  # off: zero likelihood requests; diagnostic: log only; reward: add D.
+    coefficient: 0.1
+    tau: 1.0
+    reference_aggregation: mean
+    advantage_std_floor: 0.1  # Applied only in reward mode, prevents tiny D from full rescaling.
+training:
+  algorithm: dapo
+  group_size: 8
+  candidate_groups: 32
+  target_groups: 16
+  max_num_gen_batches: 4  # <=0: no per-batch limit; finite dataset/epochs still bound sampling.
+  filter_metric: reward
+  filter_min_std: 0.000001
+  advantage_std_floor: 0.0
+  mini_batch_groups: 1
+  micro_batch_rollouts: 1
+  ppo_epochs: 1
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.28
+  kl_coefficient: 0.0
+  overlong_filter: true
+  entropy_chunk_size: 32
+  validation_every: 25
+  checkpoint_every: 25
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_judge_v1/train

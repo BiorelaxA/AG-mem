@@ -55,6 +55,8 @@ class Example:
     options: dict[str, str] = field(default_factory=dict)
     gold_answers: list[str] = field(default_factory=list)
     answer_mode: str = "text"
+    # Scoring-only metadata; public_task deliberately excludes these fields.
+    judge_metadata: dict = field(default_factory=dict)
 
     def public_task(self) -> dict:
         # Explicit allowlist: no caller should serialize the whole Example into a prompt.
@@ -69,6 +71,7 @@ class Completion:
     old_logprobs: list[float] = field(default_factory=list)
     sampling_seed: int | None = None
     sampling_batch_size: int = 1
+    truncated: bool = False
 
 
 @dataclass
@@ -101,9 +104,25 @@ class Trajectory:
     format_reward: float = 0.0
     outcome_reward: float = 0.0
     raw_read_cost: float = 0.0
+    judge_score: float | None = None
+    answer_f1: float | None = None
+    likelihood: dict = field(default_factory=dict)
+    auxiliary_reward: float = 0.0
+    # Frozen Task Agent completion metadata, distinct from Reader truncation.
+    task_completion: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def trajectory_from_dict(value: dict) -> Trajectory:
+    value = dict(value)
+    decisions = []
+    for item in value.pop("decisions"):
+        item = dict(item)
+        item["completion"] = Completion(**item["completion"])
+        decisions.append(Decision(**item))
+    return Trajectory(**value, decisions=decisions)
 
 
 class InfrastructureError(RuntimeError):
@@ -137,22 +156,30 @@ def load_config(path: str | Path) -> dict:
     execution_settings(value)
     if value.get("data", {}).get("layout", "combined") not in {"combined", "by_source"}:
         raise ValueError("data.layout must be combined or by_source")
-    if value["training"]["group_size"] != 8:
+    algorithm = value["training"].get("algorithm", "grpo")
+    if algorithm not in {"grpo", "dapo"}:
+        raise ValueError("training.algorithm must be grpo or dapo")
+    if algorithm == "grpo" and value["training"]["group_size"] != 8:
         raise ValueError("This experiment fixes GRPO group_size=8")
     if value["training"]["parameterization"] != "full":
         raise ValueError("Reader must use full parameter training")
     if value["memory"]["record_unit"] != "session" or value["writer"]["lookback_sessions"] < 3:
         raise ValueError("Use one entry per session and at least three preceding sessions")
     max_ids = value["retrieval"]["max_ids_per_call"]
-    if value["retrieval"].get("id_protocol", "strict_v1") not in {"strict_v1", "repair_v2"}:
+    if value["retrieval"].get("id_protocol", "strict_v1") not in {"strict_v1", "strict_v2", "repair_v2"}:
         raise ValueError("Unknown retrieval.id_protocol")
     if type(max_ids) is not int or max_ids < 1:
         raise ValueError("retrieval.max_ids_per_call must be a positive integer")
     if value["reward"]["read_call_cost"] != 0.01:
         raise ValueError("Experiment fixes read_call_cost=0.01")
     penalty = value["reward"].get("format_penalty", 0.0)
-    if value["reward"].get("formula", "outcome_cost_v1") not in {"outcome_cost_v1", "outcome_gated_v2"}:
+    if value["reward"].get("formula", "outcome_cost_v1") not in {"outcome_cost_v1", "outcome_gated_v2", "judge_gated_v1", "judge_cost_v2"}:
         raise ValueError("Unknown reward.formula")
+    if value["reward"].get("formula") == "judge_cost_v2" and value["retrieval"].get("id_protocol") != "strict_v2":
+        raise ValueError("judge_cost_v2 requires retrieval.id_protocol=strict_v2 for repeat-read penalties")
     if isinstance(penalty, bool) or not isinstance(penalty, (int, float)) or not math.isfinite(penalty) or penalty < 0:
         raise ValueError("reward.format_penalty must be finite and nonnegative")
+    if algorithm == "dapo":
+        from .dapo_sampling import validate_dapo_config
+        validate_dapo_config(value)
     return value

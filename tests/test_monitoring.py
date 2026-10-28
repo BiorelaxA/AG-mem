@@ -9,10 +9,28 @@ import unittest
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from agmem.cli import main
-from agmem.monitoring import export_tensorboard, summary_writer_class, write_train_metrics, write_validation_metrics
+from agmem.monitoring import export_tensorboard, summary_writer_class, write_train_metrics, write_validation_metrics, write_sampling_metrics
 
 
 class MonitoringTests(unittest.TestCase):
+    def test_rebuild_restores_committed_sampling_axis_and_entropy_after_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer = summary_writer_class()(log_dir=str(root / "tensorboard"))
+            write_train_metrics(writer, {"step": 1, "entropy": 0.7})
+            write_train_metrics(writer, {"step": 2, "entropy": 0.2})
+            write_sampling_metrics(writer, {"step": 0, "candidate_index": 32, "accepted_rate": 0.5})
+            write_sampling_metrics(writer, {"step": 1, "candidate_index": 64, "accepted_rate": 0.1})
+            writer.close()
+            # The checkpoint includes update 1 and the first entire sampled batch.
+            (root / "train_metrics.jsonl").write_text('{"step":1,"entropy":0.7}\n')
+            (root / "sampling_metrics.jsonl").write_text('{"step":0,"candidate_index":32,"accepted_rate":0.5}\n')
+            export_tensorboard(root)
+            events = EventAccumulator(str(root / "tensorboard")).Reload()
+            self.assertEqual([p.step for p in events.Scalars("train/entropy")], [1])
+            self.assertEqual([p.step for p in events.Scalars("sampling/accepted_rate")], [32])
+            self.assertAlmostEqual(events.Scalars("train/entropy")[0].value, 0.7, places=6)
+
     def validation_report(self):
         return {"pooled": {"reward": 0.5, "outcome_f1": 0.6},
                 "source_macro": {"reward": 0.4}, "by_source": {"fixture": {"reward": 0.5}}}

@@ -1,0 +1,5 @@
+extends: train_dapo_locomo_s_v2.yaml
+# Opt-in throughput trial. Long decisions still run singly above the token budget.
+training:
+  micro_batch_rollouts: 2
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_micro2/train

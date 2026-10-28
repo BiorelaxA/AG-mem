@@ -1,9 +1,10 @@
 from copy import deepcopy
 import unittest
+from types import SimpleNamespace
 
 from agmem.core import Completion, Decision, Example, Trajectory
 from agmem.pipeline import metrics
-from agmem.rewards import advantages, score_trajectory
+from agmem.rewards import advantages, protocol_metrics, score_trajectory
 
 
 class OutcomeGatedRewardTests(unittest.TestCase):
@@ -62,6 +63,88 @@ class OutcomeGatedRewardTests(unittest.TestCase):
             self.assertAlmostEqual(values['read_cost'], 0.005)
             self.assertAlmostEqual(values['raw_read_cost'], 0.025)
             self.assertAlmostEqual(values['reward'], values['outcome_reward'] - values['read_cost'] + values['format_reward'])
+
+
+class JudgeCostRewardTests(unittest.TestCase):
+    config = {"formula": "judge_cost_v2", "read_call_cost": 0.01, "format_penalty": 0.1,
+              "likelihood": {"mode": "off"}}
+
+    def score(self, judge_score, calls, violations=(), prediction="red"):
+        example = Example("locomo/train/0", "locomo", "train", "memory", "?", gold_answers=["blue"])
+        row = Trajectory(example.sample_id, 0, example.memory_id, prediction=prediction, n_read_calls=calls,
+                         decisions=[Decision([], Completion("read"), {"ids": ["A"], "stop": False},
+                                             format_violations=list(violations))])
+        return score_trajectory(example, row, self.config, judge=SimpleNamespace(score=lambda *_: judge_score))
+
+    def test_every_actual_call_costs_regardless_of_binary_judge_and_f1(self):
+        for judge_score in (0, 1):
+            for calls in (0, 1, 8):
+                with self.subTest(judge=judge_score, calls=calls):
+                    # F1 deliberately disagrees with the Judge in both cases.
+                    row = self.score(judge_score, calls, prediction="blue" if judge_score == 0 else "red")
+                    self.assertEqual(row.answer_f1, 1 - judge_score)
+                    self.assertEqual(row.outcome, judge_score)
+                    self.assertEqual(row.outcome_reward, 2 * judge_score - 1)
+                    self.assertAlmostEqual(row.read_cost, 0.01 * calls)
+                    self.assertAlmostEqual(row.reward, 2 * judge_score - 1 - 0.01 * calls)
+
+    def test_repeat_unknown_and_other_violations_pay_one_trajectory_penalty(self):
+        row = self.score(0, 8, ("repeated_read", "unknown_id", "duplicate_ids"))
+        row.decisions *= 3
+        example = Example(row.sample_id, "locomo", "train", "memory", "?", gold_answers=["blue"])
+        score_trajectory(example, row, self.config, judge=SimpleNamespace(score=lambda *_: 0))
+        self.assertTrue(row.format_failure)
+        self.assertEqual(row.format_reward, -0.1)
+        self.assertAlmostEqual(row.reward, -1.18)
+
+    def test_unknown_tool_error_is_a_format_failure_only_under_new_reward(self):
+        example = Example("locomo/train/0", "locomo", "train", "m", "?", gold_answers=["blue"])
+        row = Trajectory(example.sample_id, 0, "m", prediction="red", n_read_calls=1,
+                         decisions=[Decision([], Completion("read"), {"ids": ["bad"], "stop": False},
+                                             {"ok": False, "error": {"code": "unknown_or_unauthorized_id"}})])
+        judge = SimpleNamespace(score=lambda *_: 0)
+        legacy = score_trajectory(example, deepcopy(row), {**self.config, "formula": "judge_gated_v1"}, judge=judge)
+        current = score_trajectory(example, row, self.config, judge=judge)
+        self.assertEqual(legacy.reward, -1)
+        self.assertFalse(legacy.format_failure)
+        self.assertAlmostEqual(current.reward, -1.11)
+        self.assertEqual(protocol_metrics([current])["format_decisions_unknown_id"], 1)
+
+    def test_protocol_metrics_distinguish_repeats_new_evidence_and_budget_rejections(self):
+        row = self.score(1, 3)
+        def decision(ids, records, *, consumed=True, **metadata):
+            return Decision([], Completion("read"), {"ids": ids, "stop": False},
+                            {"records": [{"id": item} for item in records], "read_call_consumed": consumed, **metadata})
+        row.decisions = [decision(["A"], ["A"], new_ids=["A"], already_read_ids=[], no_new_evidence=False),
+                         decision(["A", "B"], ["B"], new_ids=["B"], already_read_ids=["A"], no_new_evidence=False),
+                         decision(["A"], [], new_ids=[], already_read_ids=["A"], no_new_evidence=True),
+                         decision(["A"], [], consumed=False, new_ids=[], already_read_ids=["A"], no_new_evidence=True)]
+        report = protocol_metrics([row])
+        self.assertEqual(report["repeated_read_rate"], 1)
+        self.assertEqual(report["format_decisions_repeated_read"], 3)
+        self.assertEqual(report["repeated_read_calls"], 2)
+        self.assertAlmostEqual(report["repeated_read_call_rate"], 2 / 3)
+        self.assertEqual(report["no_new_evidence_calls"], 1)
+        self.assertAlmostEqual(report["no_new_evidence_call_rate"], 1 / 3)
+
+    def test_legacy_protocol_metrics_can_recover_repeat_and_no_new_evidence_calls(self):
+        row = self.score(1, 3)
+        row.decisions = [Decision([], Completion("read"), {"ids": ids, "stop": False},
+                                  {"records": [{"id": item} for item in ids]})
+                         for ids in (["A"], ["A", "B"], ["A"])]
+        report = protocol_metrics([row])
+        self.assertEqual(report["repeated_read_calls"], 2)
+        self.assertEqual(report["no_new_evidence_calls"], 1)
+
+    def test_stop_ids_are_ignored_in_repeat_diagnostics(self):
+        row = self.score(1, 1)
+        row.decisions = [Decision([], Completion("read"), {"ids": ["A"], "stop": False},
+                                  {"records": [{"id": "A"}]}),
+                         Decision([], Completion("stop"), {"ids": ["A"], "stop": True})]
+        report = protocol_metrics([row])
+        self.assertEqual(report["repeated_read_rate"], 0)
+        self.assertEqual(report["format_decisions_repeated_read"], 0)
+        self.assertEqual(report["repeated_read_calls"], 0)
 
 
 if __name__ == '__main__':

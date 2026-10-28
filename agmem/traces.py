@@ -37,11 +37,22 @@ def compact_group(group: dict) -> dict:
                             "selected_ids": decision["tool_result"]["selected_ids"],
                             "returned_ids": [record["id"] for record in decision["tool_result"]["records"]],
                         } if (decision.get("tool_result") or {}).get("ids_truncated") else {}),
+                        **({
+                            "already_read_ids": decision["tool_result"]["already_read_ids"],
+                            "new_ids": decision["tool_result"]["new_ids"],
+                            "no_new_evidence": decision["tool_result"]["no_new_evidence"],
+                            "read_call_consumed": decision["tool_result"]["read_call_consumed"],
+                            "read_calls_used": decision["tool_result"]["read_calls_used"],
+                            "read_calls_remaining": decision["tool_result"]["read_calls_remaining"],
+                            "tool_error": decision["tool_result"].get("error"),
+                        } if "already_read_ids" in (decision.get("tool_result") or {}) else {}),
                     }
                     for step, decision in enumerate(row["decisions"])
                 ],
                 "task_agent_output": row["prediction"],
-                "outcome_f1": row["outcome"],
+                "task_completion": row.get("task_completion", {}),
+                "outcome_f1": row.get("answer_f1") if row.get("answer_f1") is not None else row["outcome"],
+                **{key: row[key] for key in ("judge_score", "auxiliary_reward", "likelihood", "advantage") if key in row},
                 "reward": row["reward"],
                 # Historical groups keep their recorded reward unchanged.
                 **{key: row[key] for key in ("read_cost", "raw_read_cost", "outcome_reward", "format_failure", "format_reward") if key in row},

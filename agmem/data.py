@@ -61,6 +61,7 @@ def adapt_row(row: dict, source: str, split: str, index: int, memory_id: str = "
     example = Example(sample_id, source, split, memory_id, query, gold_answers=[answer])
     if source in LONGMEMEVAL_SOURCES:
         example.observation = question_date_observation(row.get("question_date"))
+        example.judge_metadata = {key: row[key] for key in ("question_type", "question_id") if key in row}
     if source in {"personamem_32k", "personamem_128k"}:
         example.options = labeled_options(decode_list(row["all_options"], "all_options"))
         label = option_label(row.get("correct_answer"))
@@ -114,11 +115,12 @@ def task_examples(config, store, split):
     manifest = json.loads(manifest_path.read_text())
     entries = {row["source"]: row for row in manifest["sources"]}
     identity = store.get_metadata("prepare_identity")
+    needs_judge = config.get("reward", {}).get("formula") in {"judge_gated_v1", "judge_cost_v2"}
     cache = getattr(store, "_question_date_rows", None)
     if cache is None:
         cache = store._question_date_rows = {}
     for source in sorted(sources):
-        key = (str(root.resolve()), source, split)
+        key = (str(root.resolve()), source, split, needs_judge)
         if key in cache:
             continue
         prepared = identity["datasets"][source] if identity.get("layout") == "by_source" else identity
@@ -130,7 +132,13 @@ def task_examples(config, store, split):
         file = pq.ParquetFile(path)
         if "question_date" not in file.schema_arrow.names:
             raise InvalidSample(f"LongMemEval question_date column missing: {path}")
-        cache[key] = file.read(columns=["question", "answer", "question_date"]).to_pylist()
+        columns = ["question", "answer", "question_date"]
+        if needs_judge:
+            for field in ("question_type", "question_id"):
+                if field not in file.schema_arrow.names:
+                    raise InvalidSample(f"LongMemEval Judge requires {field}: {path}")
+                columns.append(field)
+        cache[key] = file.read(columns=columns).to_pylist()
     restored = []
     for example in examples:
         if example.source not in sources:
@@ -140,7 +148,7 @@ def task_examples(config, store, split):
         if len(parts) != 3 or parts[:2] != [example.source, split] or not parts[2].isdigit():
             raise ValueError(f"Cannot map prepared sample to question date: {example.sample_id}")
         index = int(parts[2])
-        rows = cache[(str(root.resolve()), example.source, split)]
+        rows = cache[(str(root.resolve()), example.source, split, needs_judge)]
         if index >= len(rows):
             raise ValueError(f"Question-date row missing: {example.sample_id}")
         raw = rows[index]
@@ -149,7 +157,12 @@ def task_examples(config, store, split):
         observation = question_date_observation(raw["question_date"])
         if example.observation not in ("", observation):
             raise ValueError(f"Conflicting prepared question-date context: {example.sample_id}")
-        restored.append(replace(example, observation=observation))
+        metadata = example.judge_metadata
+        if needs_judge:
+            metadata = {key: raw[key] for key in ("question_type", "question_id")}
+            if example.judge_metadata and example.judge_metadata != metadata:
+                raise ValueError(f"Conflicting prepared Judge metadata: {example.sample_id}")
+        restored.append(replace(example, observation=observation, judge_metadata=metadata))
     return restored
 
 

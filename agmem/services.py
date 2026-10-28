@@ -4,6 +4,7 @@ import os
 import time
 from ipaddress import ip_address
 from concurrent.futures import Future
+from copy import deepcopy
 from threading import Lock
 from urllib.parse import urlsplit
 
@@ -13,8 +14,11 @@ from .execution import bounded_results
 from .prompts import writer_messages
 
 
+TASK_OUTPUT_POLICY = "score_nonempty_truncated_v1"
+
+
 class IncompleteServiceCompletion(InfrastructureError):
-    """A response with missing content or an unacceptable truncated task answer."""
+    """A response with missing content or an unacceptable truncated judge label."""
 
     def __init__(self, text, finish_reason, usage):
         self.text, self.finish_reason, self.usage = text, finish_reason, usage
@@ -43,27 +47,44 @@ class ChatService:
         self._lock = Lock()
         self._inflight = {}
 
-    def complete(self, messages: list[dict], max_tokens: int, seed: int = 42, cache_scope: str | None = None) -> str:
+    def complete(self, messages: list[dict], max_tokens: int, seed: int = 42, cache_scope: str | None = None,
+                 *, validator=None, metadata: dict | None = None) -> str:
+        if metadata is not None:
+            if not isinstance(metadata, dict):
+                raise TypeError("Completion metadata must be a per-call dictionary")
+            metadata.clear()
         request = {"model": self.config["model"], "messages": messages, "temperature": 0.0,
                    "max_tokens": max_tokens, "seed": seed,
                    "chat_template_kwargs": {"enable_thinking": False}}
-        key = digest({"identity": self.identity, "role": self.role, "request": request, "cache_scope": cache_scope})
+        identity = {"identity": self.identity, "role": self.role, "request": request, "cache_scope": cache_scope}
+        if self.role == "task_agent":
+            # Old cache values contain only text, so they cannot attest whether
+            # a task answer was truncated. Keep the response metadata protocol
+            # separate from Writer/Judge string caches and from older readers.
+            identity["response_protocol"] = TASK_OUTPUT_POLICY
+        key = digest(identity)
         # Identical evidence can occur in several rollouts. Share one request,
         # including its failure, without serializing unrelated HTTP requests.
         with self._lock:
             cached = self.store.completion(key)
             if cached is not None:
-                return cached
+                text = self._completion_text(cached, metadata)
+                if validator is not None:
+                    try:
+                        validator(text)
+                    except Exception as exc:
+                        raise InfrastructureError("Invalid cached service response; use a corrected scoring protocol") from exc
+                return text
             future = self._inflight.get(key)
             owner = future is None
             if owner:
                 future = self._inflight[key] = Future()
         if not owner:
-            return future.result()
+            return self._completion_text(future.result(), metadata)
         try:
-            text = self._request(request, key, cache_scope, max_tokens)
-            future.set_result(text)
-            return text
+            record = self._request(request, key, cache_scope, max_tokens, validator=validator)
+            future.set_result(record)
+            return self._completion_text(record, metadata)
         except BaseException as exc:
             future.set_exception(exc)
             raise
@@ -71,7 +92,24 @@ class ChatService:
             with self._lock:
                 self._inflight.pop(key, None)
 
-    def _request(self, request, key, cache_scope, max_tokens):
+    def _completion_text(self, record, metadata):
+        if self.role != "task_agent":
+            return record
+        if (not isinstance(record, dict) or record.get("protocol") != TASK_OUTPUT_POLICY
+                or not isinstance(record.get("text"), str) or not record["text"].strip()
+                or type(record.get("truncated")) is not bool
+                or record["truncated"] != (record.get("finish_reason") == "length")
+                or "finish_reason" not in record or "usage" not in record
+                or (record["usage"] is not None and not isinstance(record["usage"], dict))
+                or type(record.get("max_tokens")) is not int or record["max_tokens"] < 1):
+            raise InfrastructureError("Invalid cached Task completion metadata; no task score assigned")
+        if metadata is not None:
+            # In-flight requests can have many rollout consumers. Never let a
+            # caller mutate the shared result or another trajectory's usage.
+            metadata.update(deepcopy({key: value for key, value in record.items() if key != "text"}))
+        return record["text"]
+
+    def _request(self, request, key, cache_scope, max_tokens, *, validator=None):
         headers = {}
         env_name = self.config.get("api_key_env")
         if env_name and os.environ.get(env_name):
@@ -89,13 +127,22 @@ class ChatService:
                 choice = payload["choices"][0]
                 text = choice["message"]["content"]
                 if (not isinstance(text, str) or not text.strip()
-                        or (choice.get("finish_reason") == "length" and self.role != "writer")):
+                        or (choice.get("finish_reason") == "length" and self.role not in {"writer", "task_agent"})):
                     raise IncompleteServiceCompletion(text, choice.get("finish_reason"), payload.get("usage"))
-                if choice.get("finish_reason") == "length" and self.role == "writer":
-                    print(canonical({"event": "writer_output_truncated", "cache_scope": cache_scope,
+                if choice.get("finish_reason") == "length" and self.role in {"writer", "task_agent"}:
+                    print(canonical({"event": f"{self.role}_output_truncated", "cache_scope": cache_scope,
                                      "max_tokens": max_tokens, "usage": payload.get("usage")}), flush=True)
-                self.store.put_completion(key, text)
-                return text
+                if validator is not None:
+                    validator(text)
+                record = text
+                if self.role == "task_agent":
+                    record = {"protocol": TASK_OUTPUT_POLICY, "text": text,
+                              "finish_reason": choice.get("finish_reason"),
+                              "truncated": choice.get("finish_reason") == "length",
+                              "usage": payload.get("usage"), "max_tokens": max_tokens}
+                    self._completion_text(record, None)
+                self.store.put_completion(key, record)
+                return record
             except Exception as exc:
                 last_error = exc
                 log_path = self.store.root / "service_failures.jsonl"
@@ -191,7 +238,7 @@ class TaskAgent:
     def __init__(self, service, max_output_tokens=512):
         self.service, self.max_output_tokens = service, max_output_tokens
 
-    def answer(self, example, evidence):
+    def answer(self, example, evidence, *, metadata: dict | None = None):
         from .prompts import task_messages
         messages = task_messages(example, evidence)
-        return self.service.complete(messages, self.max_output_tokens), digest(messages)
+        return self.service.complete(messages, self.max_output_tokens, metadata=metadata), digest(messages)

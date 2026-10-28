@@ -175,7 +175,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in ten.evidence], keys[:4])
         config = {'reward': {'formula': 'outcome_gated_v2', 'read_call_cost': 0.01, 'format_penalty': 0.1}}
         seen = []
-        def answer(example, evidence):
+        def answer(example, evidence, *, metadata=None):
             seen.append([row['id'] for row in evidence])
             return 'SECRET_GOLD', 'hash'
         agent = SimpleNamespace(answer=answer)
@@ -257,7 +257,7 @@ class CoreTests(unittest.TestCase):
         stop = {"ids": [], "stop": True}
         env = MemoryEnvironment(self.store, self.builder.version)
         config = {"reward": {"read_call_cost": 0.01, "format_penalty": 0.1}}
-        agent = SimpleNamespace(answer=lambda example, evidence: ("SECRET_GOLD", "hash"))
+        agent = SimpleNamespace(answer=lambda example, evidence, **kwargs: ("SECRET_GOLD", "hash"))
         cases = [
             ("not JSON", 0),
             ('{"ids":[],["stop":false}', 0),
@@ -296,7 +296,7 @@ class CoreTests(unittest.TestCase):
     def test_stop_ignores_nonempty_ids_without_reading_or_format_penalty(self):
         key = self.directory[0]["id"]
         config = {"reward": {"read_call_cost": 0.01, "format_penalty": 0.1}}
-        agent = SimpleNamespace(answer=lambda example, evidence: ("SECRET_GOLD", "hash"))
+        agent = SimpleNamespace(answer=lambda example, evidence, **kwargs: ("SECRET_GOLD", "hash"))
         env = MemoryEnvironment(self.store, self.builder.version, max_calls=1)
         for ids in ([], [key], ["unknown"], [key] * 11):
             for read_first in (False, True):
@@ -324,7 +324,7 @@ class CoreTests(unittest.TestCase):
         key = self.directory[0]["id"]
         stop, read = {"ids": [], "stop": True}, {"ids": [key], "stop": False}
         config = {"reward": {"read_call_cost": 0.01, "format_penalty": 0.1}}
-        agent = SimpleNamespace(answer=lambda example, evidence: ("wrong", "hash"))
+        agent = SimpleNamespace(answer=lambda example, evidence, **kwargs: ("wrong", "hash"))
         env = MemoryEnvironment(self.store, self.builder.version)
         cases = [([stop], 0), ([read, stop], 1), ([read, read, stop], 2),
                  (['```json\n' + json.dumps(read) + '\n```', stop], 1),
@@ -352,7 +352,7 @@ class CoreTests(unittest.TestCase):
         read = {"ids": [key], "stop": False}
         duplicate = {"ids": [key, key], "stop": False}
         policy = ScriptedPolicy([stop, "bad JSON", read, stop, duplicate, duplicate, stop] * 2)
-        agent = SimpleNamespace(answer=lambda example, evidence: ("wrong", "hash"))
+        agent = SimpleNamespace(answer=lambda example, evidence, **kwargs: ("wrong", "hash"))
         config = {"seed": 42, "reward": {"read_call_cost": 0.01, "format_penalty": 0.1},
                   "training": {"advantage_epsilon": 1e-6}}
         group = collect_group(config, MemoryEnvironment(self.store, self.builder.version), policy, agent, self.example, 0)

@@ -147,6 +147,8 @@ def directory_version(store):
 
 
 def build_directories(config, limit=None, sources=None):
+    if config["data"].get("frozen_directory_version"):
+        raise ValueError("Frozen directories are read-only training inputs; build new directories with a separate configuration")
     if config["data"].get("layout", "combined") == "by_source":
         versions = {}
         for source, child in dataset_configs(config, sources):
@@ -183,22 +185,50 @@ def build_directories(config, limit=None, sources=None):
         store.close()
 
 
-def validate_directories(config, store, splits):
-    """Fail before loading training weights if a selected history is not ready."""
+def validate_directory_version(config, store):
+    """Use the same Writer provenance contract before and during model setup."""
     from types import SimpleNamespace
     from .policy import model_fingerprint
     from .services import DirectoryBuilder
-    identity = {key: config["service"][key] for key in ("base_url", "model")}
-    identity["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
-    expected = DirectoryBuilder(store, SimpleNamespace(identity=identity), config["writer"], None).version
+    frozen = config.get("data", {}).get("frozen_directory_version")
+    if frozen is not None and (not isinstance(frozen, str) or len(frozen) != 64
+                               or any(c not in "0123456789abcdef" for c in frozen)):
+        raise ValueError("frozen_directory_version must be an explicit SHA-256 directory version")
+    if frozen:
+        expected = frozen
+    else:
+        identity = {key: config["service"][key] for key in ("base_url", "model")}
+        identity["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
+        expected = DirectoryBuilder(store, SimpleNamespace(identity=identity), config["writer"], None).version
     if directory_version(store) != expected:
         raise ValueError("Selected directory versions differ from current Writer; build selected datasets first")
     # Check each source, including shared histories, so incomplete source artifacts
     # cannot be hidden by another source's published directory.
     children = store.stores.values() if isinstance(store, DatasetStores) else [store]
     for child in children:
+        if frozen:
+            # A migrated dataset retains its original Writer provenance. This
+            # does not claim the current Task Agent is the original Writer.
+            recorded = child.get_metadata("directory_service_identity", {})
+            if not all(recorded.get(k) for k in ("base_url", "model", "model_revision")):
+                raise ValueError("Frozen directory lacks recorded Writer identity")
+            identity = {k: recorded[k] for k in ("base_url", "model", "model_revision")}
+            original = DirectoryBuilder(child, SimpleNamespace(identity=identity), config["writer"], None).version
+            if original != frozen:
+                raise ValueError("Frozen directory does not match recorded Writer identity/current prompt/configuration")
+    return expected
+
+
+def validate_directories(config, store, splits):
+    """Fail before loading training weights if a selected history is not ready."""
+    expected = validate_directory_version(config, store)
+    frozen = config["data"].get("frozen_directory_version")
+    children = store.stores.values() if isinstance(store, DatasetStores) else [store]
+    for child in children:
         for memory_id in sorted({e.memory_id for split in splits for e in child.examples(split)}):
-            child.directory(memory_id, expected)
+            entries = child.directory(memory_id, expected)
+            if frozen and any(e.get("writer_status") == "empty_pending" or not e["content"].strip() for e in entries):
+                raise ValueError("Frozen directory contains empty or pending summaries")
 
 
 def import_prepared(config, source_root):
@@ -281,14 +311,8 @@ def import_prepared(config, source_root):
 
 
 def make_environment(config, store, policy):
-    from types import SimpleNamespace
-    from .policy import chat_token_ids, load_tokenizer, model_fingerprint
-    from .services import DirectoryBuilder
-    identity = {"base_url": config["service"]["base_url"], "model": config["service"]["model"],
-                "model_revision": model_fingerprint(config["models"]["task_path"])["fingerprint"]}
-    expected_version = DirectoryBuilder(store, SimpleNamespace(identity=identity), config["writer"], None).version
-    if directory_version(store) != expected_version:
-        raise ValueError("Writer model/prompt/config changed; rebuild directories before training/evaluation")
+    from .policy import chat_token_ids, load_tokenizer
+    expected_version = validate_directory_version(config, store)
     task_tokenizer = load_tokenizer(config["models"]["task_path"])
     def capacity(reader_input, task_input):
         policy.check_capacity(reader_input)
@@ -297,7 +321,7 @@ def make_environment(config, store, policy):
             tokens = chat_token_ids(task_tokenizer, task_input)
             if len(tokens) + config["task_agent"]["max_output_tokens"] > limit:
                 raise CapacityError("Task-agent context would overflow")
-    return MemoryEnvironment(store, directory_version(store), config["retrieval"]["max_ids_per_call"], config["retrieval"]["max_read_calls"], capacity, id_protocol=config["retrieval"].get("id_protocol", "strict_v1"))
+    return MemoryEnvironment(store, expected_version, config["retrieval"]["max_ids_per_call"], config["retrieval"]["max_read_calls"], capacity, id_protocol=config["retrieval"].get("id_protocol", "strict_v1"))
 
 
 def make_task_agent(config, store):
@@ -308,27 +332,50 @@ def make_task_agent(config, store):
     return TaskAgent(ChatService(service_config, store, "task_agent"), config["task_agent"]["max_output_tokens"])
 
 
-def scored_rollout(config, env, policy, agent, example, seed):
+def make_reward_scorer(config, store):
+    from .rewards import RewardScorer
+    judge, likelihood = None, None
+    if config["reward"].get("formula") in {"judge_gated_v1", "judge_cost_v2"}:
+        from .judges import JudgeScorer
+        from .likelihood import ReferenceLikelihoodScorer
+        from .policy import load_tokenizer, model_fingerprint
+        service = dict(config["service"])
+        service["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
+        judge = JudgeScorer(service, store, config["reward"].get("judge", {}))
+        likelihood_config = dict(config["reward"].get("likelihood", {"mode": "off"}))
+        likelihood_config.setdefault("max_context_tokens", config["task_agent"].get("max_context_tokens", 65536))
+        likelihood = ReferenceLikelihoodScorer(service, store, likelihood_config,
+                            tokenizer_factory=lambda: load_tokenizer(config["models"]["task_path"]))
+    return RewardScorer(config["reward"], judge=judge, likelihood=likelihood,
+                        max_ids=config["retrieval"]["max_ids_per_call"])
+
+
+def scored_rollout(config, env, policy, agent, example, seed, scorer=None):
     trajectory = env.run(example, policy, seed, policy.policy_version)
-    trajectory.prediction, trajectory.task_input_hash = agent.answer(example, trajectory.evidence)
-    return score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids)
+    trajectory.prediction, trajectory.task_input_hash = agent.answer(
+        example, trajectory.evidence, metadata=trajectory.task_completion)
+    return (scorer.score(example, trajectory) if scorer else
+            score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids))
 
 
-def collect_group(config, env, policy, agent, example, step):
+def collect_group(config, env, policy, agent, example, step, scorer=None):
     execution = execution_settings(config)
     version = policy.policy_version
-    seeds = [seeded_int(config["seed"], example.sample_id, version, step, i) % (2 ** 31) for i in range(8)]
+    group_size = config["training"].get("group_size", 8)
+    seeds = [seeded_int(config["seed"], example.sample_id, version, step, i) % (2 ** 31) for i in range(group_size)]
     batch_size = execution["reader_batch_size"]
 
     def score(trajectory):
-        trajectory.prediction, trajectory.task_input_hash = agent.answer(example, trajectory.evidence)
-        return score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids)
+        trajectory.prediction, trajectory.task_input_hash = agent.answer(
+            example, trajectory.evidence, metadata=trajectory.task_completion)
+        return (scorer.score(example, trajectory) if scorer else
+                score_trajectory(example, trajectory, config["reward"], max_ids=env.max_ids))
 
     # Only this thread owns the Reader model. Workers access the frozen HTTP
     # Task Agent; no gradients or policy changes occur until all futures finish.
     group, pending = [], []
     with ThreadPoolExecutor(max_workers=execution["task_agent_workers"]) as pool:
-        for offset in range(0, 8, batch_size):
+        for offset in range(0, group_size, batch_size):
             if batch_size == 1:
                 rows = [env.run(example, policy, seeds[offset], version)]
             else:
@@ -341,8 +388,8 @@ def collect_group(config, env, policy, agent, example, step):
                     pending.append(pool.submit(score, row))
         # Preserve rollout_index ordering even if scoring completes out of order.
         group.extend(future.result() for future in pending)
-    if len(group) != 8 or policy.policy_version != version or any(row.policy_version != version for row in group):
-        raise ValueError("GRPO collection must finish eight rollouts under one unchanged policy version")
+    if len(group) != group_size or policy.policy_version != version or any(row.policy_version != version for row in group):
+        raise ValueError("Group collection must finish all rollouts under one unchanged policy version")
     for trajectory, advantage in zip(group, advantages([row.reward for row in group], config["training"]["advantage_epsilon"])):
         trajectory.advantage = advantage
     return group
@@ -354,13 +401,18 @@ def metrics(rows):
     def summarize(values):
         n = len(values)
         calls = sorted(row.n_read_calls for row in values)
-        return {**protocol_metrics(values), "n": n, "outcome_f1": sum(row.outcome for row in values) / n,
+        answer_f1 = sum(row.answer_f1 if row.answer_f1 is not None else row.outcome for row in values) / n
+        judged = all(row.judge_score is not None for row in values)
+        return {**protocol_metrics(values), "n": n, "outcome_f1": answer_f1, "answer_f1": answer_f1,
+                **({"judge_accuracy": sum(row.judge_score for row in values) / n} if judged else {}),
+                "auxiliary_reward": sum(row.auxiliary_reward for row in values) / n,
                 "outcome_reward": sum(row.outcome_reward for row in values) / n,
                 "reward": sum(row.reward for row in values) / n, "read_calls": sum(calls) / n,
                 "read_cost": sum(row.read_cost for row in values) / n,
                 "raw_read_cost": sum(row.raw_read_cost for row in values) / n,
                 "format_reward": sum(row.format_reward for row in values) / n,
                 "format_failure_rate": sum(row.format_failure for row in values) / n,
+                "task_truncation_rate": sum(bool(row.task_completion.get("truncated")) for row in values) / n,
                 "p95_read_calls": calls[min(n - 1, int(0.95 * n))],
                 "natural_stop_rate": sum(row.termination_reason == "stop" for row in values) / n,
                 "protocol_failure_rate": sum(row.termination_reason == "protocol_failure" for row in values) / n,
@@ -375,36 +427,47 @@ def metrics(rows):
     by_source = {source: summarize(values) for source, values in grouped.items()}
     return {"pooled": summarize(rows), "by_source": by_source,
             "source_macro": {key: sum(values[key] for values in by_source.values()) / len(by_source)
-                             for key in ("outcome_f1", "outcome_reward", "reward", "read_calls", "read_cost", "raw_read_cost", "format_reward", "format_failure_rate")},
-            "metric_scope": "This split's QA label/text F1, call cost and format penalty, not official benchmark metrics."}
+                             for key in ("outcome_f1", "answer_f1", "outcome_reward", "reward", "read_calls", "read_cost", "raw_read_cost", "format_reward", "format_failure_rate", "auxiliary_reward", "task_truncation_rate",
+                                         "repeated_read_rate", "repeated_read_calls", "repeated_read_call_rate",
+                                         "no_new_evidence_calls", "no_new_evidence_call_rate") +
+                                        (("judge_accuracy",) if all("judge_accuracy" in v for v in by_source.values()) else ())},
+            "metric_scope": "Fixed configured Judge protocol (when enabled), separate QA F1, call cost and format penalty; not an official benchmark model configuration."}
 
 
 def evaluate_with_policy(config, store, policy, split, output, limit=None):
+    from contextlib import ExitStack
     from .prompts import task_input_contract
     validate_directories(config, store, [split])
-    env, agent = make_environment(config, store, policy), make_task_agent(config, store)
-    examples = task_examples(config, store, split)
-    if limit is not None:
-        examples = examples[:limit]
-    rows = []
-    temperature = policy.temperature
-    policy.temperature = 0.0
-    try:
-        for example in examples:
-            started = time.monotonic()
-            row = scored_rollout(config, env, policy, agent, example, config["seed"])
-            rows.append(row)
-            append_json(Path(output) / "episodes.jsonl", {**row.to_dict(), "elapsed_seconds": time.monotonic() - started})
-            announce("evaluation_progress", split=split, sample_id=example.sample_id, f1=row.outcome, calls=row.n_read_calls)
-    finally:
-        policy.temperature = temperature
-    report = metrics(rows)
-    report["task_input_contract"] = task_input_contract()
-    atomic_json(Path(output) / "metrics.json", report)
-    return report
+    env = make_environment(config, store, policy)
+    with ExitStack() as cleanup:
+        agent = make_task_agent(config, store)
+        cleanup.callback(agent.service.client.close)
+        scorer = make_reward_scorer(config, store)
+        cleanup.callback(scorer.close)
+        examples = task_examples(config, store, split)
+        if limit is not None:
+            examples = examples[:limit]
+        rows = []
+        temperature = policy.temperature
+        policy.temperature = 0.0
+        try:
+            for example in examples:
+                started = time.monotonic()
+                row = scored_rollout(config, env, policy, agent, example, config["seed"], scorer=scorer)
+                rows.append(row)
+                append_json(Path(output) / "episodes.jsonl", {**row.to_dict(), "elapsed_seconds": time.monotonic() - started})
+                announce("evaluation_progress", split=split, sample_id=example.sample_id, f1=row.answer_f1,
+                         judge_accuracy=row.judge_score, calls=row.n_read_calls)
+        finally:
+            policy.temperature = temperature
+        report = metrics(rows)
+        report["task_input_contract"] = task_input_contract()
+        report["scoring_protocol"] = scorer.provenance()
+        atomic_json(Path(output) / "metrics.json", report)
+        return report
 
 
-def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index, validation=None):
+def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index, validation=None, *, dapo_state=None):
     import torch
     from .prompts import task_input_contract
     if validation is not None:
@@ -416,7 +479,8 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
     policy.tokenizer.save_pretrained(temporary / "model")
     torch.save({"optimizer": optimizer.state_dict(), "step": step, "epoch": epoch, "next_index": next_index,
                 "policy_version": policy.policy_version, "config": config,
-                "task_input_contract": task_input_contract()}, temporary / "trainer.pt")
+                "task_input_contract": task_input_contract(),
+                **({"dapo_state": dapo_state} if dapo_state is not None else {})}, temporary / "trainer.pt")
     if validation is not None:
         atomic_json(temporary / "validation_metrics.json", validation)
     temporary.rename(destination)
@@ -427,6 +491,12 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
 
 def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
           fork_id_protocol_resume=False, validate_before_training=False):
+    if config["training"].get("algorithm", "grpo") == "dapo":
+        if fork_retrieval_resume or fork_id_protocol_resume:
+            raise ValueError("DAPO reward/retrieval changes require a separate experiment")
+        from .training_dapo import train_dapo
+        return train_dapo(config, max_groups=max_groups, resume=resume,
+                          validate_before_training=validate_before_training)
     from .resume import resume_metadata, validate_resume_config
     if (fork_retrieval_resume or fork_id_protocol_resume or validate_before_training) and not resume:
         raise ValueError("Resume fork/baseline validation requires --resume")
@@ -471,6 +541,7 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
         env, agent = make_environment(config, store, policy), make_task_agent(config, store)
         metadata = {"config": config, "reader": model_fingerprint(config["models"]["reader_path"]),
                     "task": model_fingerprint(config["models"]["task_path"]), "directory_version": directory_version(store),
+                    "directory_service_identity": store.get_metadata("directory_service_identity"),
                     "prepare_identity": store.get_metadata("prepare_identity"),
                     "reader_trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad),
                     "parameterization": "full", "optimizer": "CPUAdamW_fp32_master_and_moments",

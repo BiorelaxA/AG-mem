@@ -202,7 +202,7 @@ class ConcurrencyTests(unittest.TestCase):
             batches.append(seeds_)
             return [Trajectory(ex.sample_id, seed, ex.memory_id, version, evidence=[{'i': seeds.index(seed)}],
                                termination_reason='stop') for seed in seeds_]
-        def answer(ex, evidence):
+        def answer(ex, evidence, *, metadata=None):
             index = evidence[0]['i']
             self.assertNotEqual(get_ident(), owner)
             self.assertEqual(policy.policy_version, 7)
@@ -222,7 +222,7 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual([row.outcome for row in group], [0, 1] * 4)
         self.assertEqual(policy.policy_version, 7)
         self.assertAlmostEqual(sum(row.advantage for row in group), 0)
-        agent.answer = lambda *args: (_ for _ in ()).throw(InfrastructureError('offline'))
+        agent.answer = lambda *args, **kwargs: (_ for _ in ()).throw(InfrastructureError('offline'))
         with self.assertRaises(InfrastructureError):
             collect_group(config, env, policy, agent, example, 0)
 

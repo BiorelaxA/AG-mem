@@ -1,4 +1,6 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 import json
 import os
 import tempfile
@@ -8,9 +10,9 @@ from unittest.mock import patch
 import httpcore
 import httpx
 
-from agmem.core import Example, InfrastructureError
+from agmem.core import Example, InfrastructureError, digest
 from agmem.data import clean_history
-from agmem.services import ChatService, DirectoryBuilder, TaskAgent
+from agmem.services import ChatService, DirectoryBuilder, TASK_OUTPUT_POLICY, TaskAgent
 from agmem.store import Store
 
 
@@ -80,13 +82,114 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("gold_answers", json.dumps(requests))
         self.assertNotIn("correct_answer", json.dumps(requests))
 
-    def test_http_failure_and_truncation_are_infrastructure_failures(self):
+    def test_task_length_is_scored_once_and_metadata_survives_cache_reopen(self):
+        calls = []
+        usage = {"prompt_tokens": 6916, "completion_tokens": 512,
+                 "prompt_tokens_details": {"cached_tokens": 10}}
+        payload = {"choices": [{"finish_reason": "length", "message": {"content": "Actual partial answer"}}],
+                   "usage": usage}
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(200, json=payload)
+        service = ChatService({**self.config, "retries": 2}, self.store, "task_agent")
+        service.client.close()
+        service.client = httpx.Client(transport=httpx.MockTransport(respond))
+        self.addCleanup(service.client.close)
+        agent = TaskAgent(service, 512)
+        example = Example("fixture", "fixture", "train", "m", "q", gold_answers=["gold"])
+        metadata = {}
+        answer = agent.answer(example, [], metadata=metadata)
+        expected = {"protocol": TASK_OUTPUT_POLICY, "finish_reason": "length", "truncated": True,
+                    "usage": usage, "max_tokens": 512}
+        self.assertEqual(answer[0], "Actual partial answer")
+        self.assertEqual(metadata, expected)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse((self.store.root / "service_failures.jsonl").exists())
+        metadata["usage"]["prompt_tokens_details"]["cached_tokens"] = -1
+        self.store.close()
+        self.store = Store(self.store.root)
+        service.store = self.store
+        cached_metadata = {}
+        self.assertEqual(agent.answer(example, [], metadata=cached_metadata), answer)
+        self.assertEqual(cached_metadata, expected)
+        self.assertEqual(len(calls), 1)
+
+    def test_task_cache_version_does_not_invent_metadata_for_old_plain_text(self):
+        messages = [{"role": "user", "content": "q"}]
+        request = {"model": self.config["model"], "messages": messages, "temperature": 0.0,
+                   "max_tokens": 10, "seed": 42, "chat_template_kwargs": {"enable_thinking": False}}
         service = ChatService(self.config, self.store, "task_agent")
-        for response in [httpx.Response(503), httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "A"}}]})]:
-            service.client.close()
-            service.client = httpx.Client(transport=httpx.MockTransport(lambda request: response))
-            with self.assertRaises(InfrastructureError):
-                service.complete([{"role": "user", "content": "q"}], 10)
+        old_key = digest({"identity": service.identity, "role": "task_agent", "request": request, "cache_scope": None})
+        self.store.put_completion(old_key, "old answer without metadata")
+        calls = []
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "new answer"}}]})
+        service.client.close()
+        service.client = httpx.Client(transport=httpx.MockTransport(respond))
+        self.addCleanup(service.client.close)
+        metadata = {}
+        self.assertEqual(service.complete(messages, 10, metadata=metadata), "new answer")
+        self.assertFalse(metadata["truncated"])
+        self.assertIsNone(metadata["usage"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.store.completion(old_key), "old answer without metadata")
+
+    def test_shared_task_request_copies_metadata_for_each_rollout(self):
+        started, release, barrier = Event(), Event(), Barrier(8)
+        calls = []
+        def respond(request):
+            calls.append(request)
+            started.set()
+            self.assertTrue(release.wait(timeout=5))
+            return httpx.Response(200, json={
+                "choices": [{"finish_reason": "length", "message": {"content": "partial"}}],
+                "usage": {"completion_tokens": 10}})
+        service = ChatService(self.config, self.store, "task_agent")
+        service.client.close()
+        service.client = httpx.Client(transport=httpx.MockTransport(respond))
+        self.addCleanup(service.client.close)
+        def ask(_):
+            metadata = {}
+            barrier.wait(timeout=5)
+            text = service.complete([{"role": "user", "content": "same"}], 10, metadata=metadata)
+            return text, metadata
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            pending = [pool.submit(ask, i) for i in range(8)]
+            self.assertTrue(started.wait(timeout=5))
+            release.set()
+            results = [f.result() for f in pending]
+        self.assertEqual([text for text, _ in results], ["partial"] * 8)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(m["truncated"] for _, m in results))
+        results[0][1]["usage"]["completion_tokens"] = -1
+        self.assertEqual([m["usage"]["completion_tokens"] for _, m in results[1:]], [10] * 7)
+        self.assertFalse(service._inflight)
+
+    def test_http_oom_empty_task_and_truncated_judge_remain_failures(self):
+        failures = [
+            ("task_agent", httpx.Response(503)),
+            ("task_agent", httpx.Response(500, json={"error": {"message": "CUDA out of memory"}})),
+            ("judge", httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": '{"label":"CORRECT"}'}}]})),
+        ]
+        failures.extend(("task_agent", httpx.Response(200, json={"choices": [
+            {"finish_reason": reason, "message": {"content": content}}]}))
+            for reason in ("stop", "length") for content in (None, "", "   "))
+        for role, response in failures:
+            with self.subTest(role=role, response=response):
+                calls = []
+                service = ChatService({**self.config, "retries": 2}, self.store, role)
+                service.client.close()
+                def respond(request):
+                    calls.append(request)
+                    return response
+                service.client = httpx.Client(transport=httpx.MockTransport(respond))
+                try:
+                    with patch("agmem.services.time.sleep"), self.assertRaises(InfrastructureError):
+                        service.complete([{"role": "user", "content": "q"}], 10)
+                    self.assertEqual(len(calls), 3)
+                finally:
+                    service.client.close()
         self.assertEqual(len(self.store.completions.keys()), 0)
 
     def writer_fixture(self, responses):

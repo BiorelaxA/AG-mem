@@ -9,7 +9,7 @@ from .core import canonical, load_config
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AG-Mem session directory + full parameter GRPO")
+    parser = argparse.ArgumentParser(description="AG-Mem session directory + full parameter DAPO/GRPO")
     parser.add_argument("--config", default="configs/default.yaml")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("prepare", help="Adapt fixed train/validation/test; clean annotations and report quarantines")

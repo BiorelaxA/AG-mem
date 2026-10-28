@@ -1,0 +1,70 @@
+[2026-10-26T22:24:27+08:00] job=284492 node=gpu03 model=/share/home/wtma/AG-mem/../model/qwen3.5-4b
+CUDA_VISIBLE_DEVICES=0,1,2,3; logs=/share/home/wtma/AG-mem/runs/serve_qwen35_4b_284492
+Activating conda: /share/home/wtma/miniconda3/etc/profile.d/conda.sh; environment=agmem
+Mon Oct 26 22:24:30 2026       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.183.06             Driver Version: 535.183.06   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA A100-SXM4-80GB          On  | 00000000:27:00.0 Off |                    0 |
+| N/A   31C    P0              60W / 400W |      0MiB / 81920MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+|   1  NVIDIA A100-SXM4-80GB          On  | 00000000:2A:00.0 Off |                    0 |
+| N/A   28C    P0              60W / 400W |      0MiB / 81920MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+|   2  NVIDIA A100-SXM4-80GB          On  | 00000000:51:00.0 Off |                    0 |
+| N/A   27C    P0              59W / 400W |      0MiB / 81920MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+|   3  NVIDIA A100-SXM4-80GB          On  | 00000000:57:00.0 Off |                    0 |
+| N/A   29C    P0              58W / 400W |      0MiB / 81920MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+PyTorch=2.11.0+cu129, CUDA=12.9, GPUs=4
+Starting TP=4 service: http://127.0.0.1:42585/v1 (compute node only)
+vLLM exited unexpectedly (status=1). Last log lines:
+Traceback (most recent call last):
+  File "/share/home/wtma/miniconda3/envs/agmem/bin/vllm", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/entrypoints/cli/main.py", line 18, in main
+    import vllm.entrypoints.cli.benchmark.main
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/entrypoints/cli/benchmark/main.py", line 10, in <module>
+    from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/entrypoints/utils.py", line 20, in <module>
+    from vllm.engine.arg_utils import EngineArgs
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/engine/arg_utils.py", line 35, in <module>
+    from vllm.config import (
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/config/__init__.py", line 6, in <module>
+    from vllm.config.compilation import (
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/config/compilation.py", line 22, in <module>
+    from vllm.platforms import current_platform
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/platforms/__init__.py", line 278, in __getattr__
+    _current_platform = resolve_obj_by_qualname(platform_cls_qualname)()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/utils/import_utils.py", line 109, in resolve_obj_by_qualname
+    module = importlib.import_module(module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/share/home/wtma/miniconda3/envs/agmem/lib/python3.11/site-packages/vllm/platforms/cuda.py", line 21, in <module>
+    import vllm._C  # noqa
+    ^^^^^^^^^^^^^^
+ImportError: libcudart.so.13: cannot open shared object file: No such file or directory
+[2026-10-26T22:25:12+08:00] SERVICE_FAILED: status=1 line=143; see job.log and vllm.log.
+[2026-10-26T22:25:12+08:00] Allocation retained until scancel or time limit.
+Enter it with: srun --jobid=284492 --overlap --nodes=1 --ntasks=1 --cpus-per-task=16 --gres=gpu:4 --pty bash

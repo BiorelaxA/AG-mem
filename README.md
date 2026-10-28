@@ -1,5 +1,9 @@
 # AG-Mem
 
+2026-10-28：现有四卡作业内执行 `python -u -m agmem.four_gpu`，默认使用 `configs/train_dapo_locomo_s_v2.yaml`，输出至 `runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2/train/`。新 DAPO 奖励为 `2J-1-0.01n-0.1f`，其中 `J` 由 Qwen3.5-27B Judge 二元判定，答对或答错均扣读取成本；全对、全错 group 均过滤。`strict_v2` 将重复读取计入整条轨迹最多一次的格式惩罚，只返回新证据并反馈调用预算。每轮 32 个候选 group、每题 8 条 rollout，补采收集 16 个有效 group；默认 mini/micro 仍为 1/1，另提供真实 micro=2 与 mini=2 的独立试验配置。D 默认关闭，可独立开启只记录模式；TensorBoard 继续记录 `train/entropy`，并新增重复读取、无新证据和累计训练 group 指标。每 25 次 optimizer step 验证并保存 checkpoint。新配置尚未进行实际 GPU 复测，代码修改不会自动重启现有训练。检查、启动、续训及指标说明见 [DAPO 训练说明](doc/dapo_judge_training.md)。
+
+`python -m agmem.four_gpu --check-only` 可在不加载 GPU 模型的情况下检查输入。旧 DAPO v1 配置 `configs/train_dapo_locomo_s_4x80gb.yaml` 与旧 GRPO 配置 `configs/train_locomo_s_4x80gb.yaml` 均保留，使用 `--train-config` 显式选择以复现实验；以下历史 GRPO 配置及奖励说明不代表新的 DAPO v2 默认行为。
+
 新增独立 A100 入口：`scripts/build_directories_all_a100.sbatch` 申请 1 张 `a100-sxm4-80gb`，单卡部署 27B，从 LongMemEval-M 开始为除 LoCoMo/S 外的七个来源构建目录；`scripts/train_eval_locomo_s_a100.sbatch` 申请 4 张 A100 40GB 卡，其中两张分层运行 Reader 全参 GRPO，另外两张部署 27B，负责 LoCoMo/S 的目录、训练和测试。两个任务按来源加锁共享缓存，test 使用独立存储。提交与结果路径见 [独立任务说明](doc/independent_a100_jobs.md)。
 
 当前首轮实验仅使用 LoCoMo 与 LongMemEval-S；LongMemEval-M 暂缓构建。`configs/pilot.yaml` 保留三种可选数据源，`configs/pilot_workflow.yaml` 独立选择目录构建和训练来源。支持按数据集独立准备、构建和续跑，训练时汇总选定来源，train 与 validation 保持分开。已有集中存储可以迁移复用摘要。操作与共享历史审计见 [按数据集构建说明](doc/dataset_directory_workflow_20261022.md)。

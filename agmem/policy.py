@@ -61,10 +61,9 @@ def load_model(path, device, dtype="bfloat16", checkpointing=False):
     return model.to(device).eval()
 
 
-def sequence_logprobs(model, prompt_ids, token_ids, temperature: float, device):
-    """Only completion targets receive loss; causal logits use each token's true prompt."""
+def _sequence_logits(model, prompt_ids, token_ids, temperature: float, device):
+    """Causal logits for completion positions only, using their actual prompts."""
     import torch
-    import torch.nn.functional as F
     if not prompt_ids or not token_ids or temperature <= 0:
         raise ValueError("Nonempty prompt/completion and positive behavior temperature required")
     # The final sampled token is only a target, never an input needed to score this completion.
@@ -72,8 +71,86 @@ def sequence_logprobs(model, prompt_ids, token_ids, temperature: float, device):
     n = len(token_ids)
     output = model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False, logits_to_keep=n)
     logits = output.logits[:, -n:, :].float() / temperature
-    targets = torch.tensor(token_ids, dtype=torch.long, device=device)
-    return -F.cross_entropy(logits[0], targets, reduction="none")
+    return logits[0]
+
+
+def sequence_logprobs(model, prompt_ids, token_ids, temperature: float, device):
+    """Only completion targets receive loss; causal logits use each token's true prompt."""
+    import torch
+    import torch.nn.functional as F
+    logits = _sequence_logits(model, prompt_ids, token_ids, temperature, device)
+    targets = torch.tensor(token_ids, dtype=torch.long, device=logits.device)
+    return -F.cross_entropy(logits, targets, reduction="none")
+
+
+def sequence_stats(model, prompt_ids, token_ids, temperature: float, device, *, entropy_chunk_size=32):
+    """Return differentiable token logprobs and detached full-distribution entropy.
+
+    Entropy is H(p) in nats at each completion position, at the same temperature
+    used for the policy probabilities. It is not the sampled token's surprisal.
+    Chunking bounds the extra no-grad vocabulary tensors without another forward.
+    """
+    import torch
+    import torch.nn.functional as F
+    if type(entropy_chunk_size) is not int or entropy_chunk_size < 1:
+        raise ValueError("entropy_chunk_size must be a positive integer")
+    logits = _sequence_logits(model, prompt_ids, token_ids, temperature, device)
+    targets = torch.tensor(token_ids, dtype=torch.long, device=logits.device)
+    logprobs = -F.cross_entropy(logits, targets, reduction="none")
+    with torch.no_grad():
+        entropy = []
+        for chunk in logits.detach().split(entropy_chunk_size):
+            log_p = torch.log_softmax(chunk, dim=-1)
+            entropy.append(-(log_p.exp() * log_p).sum(dim=-1))
+        entropy = torch.cat(entropy)
+        if not torch.isfinite(entropy).all():
+            raise FloatingPointError("Non-finite policy entropy")
+    return logprobs, entropy
+
+
+def sequence_stats_batch(model, prompts, completions, temperature: float, device, *,
+                         pad_token_id=0, entropy_chunk_size=32):
+    """Score independent variable-length decisions in one training forward.
+
+    Left padding aligns every final predictor position. Explicit positions restart
+    at zero for each real sequence (including Qwen3.5's text RoPE axes). Attention
+    masks exclude padding; slicing the last ``len(completion)`` logits excludes
+    both prompt and padding positions from the objective. No sequence is truncated.
+    Returned tensors retain their individual completion lengths and autograd graph.
+    """
+    import torch
+    import torch.nn.functional as F
+    if not prompts or len(prompts) != len(completions):
+        raise ValueError("A nonempty batch of paired prompts and completions is required")
+    if temperature <= 0 or any(not prompt or not tokens for prompt, tokens in zip(prompts, completions)):
+        raise ValueError("Nonempty prompt/completion and positive behavior temperature required")
+    if type(entropy_chunk_size) is not int or entropy_chunk_size < 1:
+        raise ValueError("entropy_chunk_size must be a positive integer")
+    sequences = [prompt + tokens[:-1] for prompt, tokens in zip(prompts, completions)]
+    width = max(map(len, sequences))
+    ids = torch.full((len(sequences), width), pad_token_id, dtype=torch.long, device=device)
+    mask = torch.zeros_like(ids)
+    for index, sequence in enumerate(sequences):
+        ids[index, -len(sequence):] = torch.tensor(sequence, dtype=torch.long, device=device)
+        mask[index, -len(sequence):] = 1
+    positions = (mask.cumsum(dim=-1) - 1).masked_fill(mask == 0, 0)
+    output = model(input_ids=ids, attention_mask=mask, position_ids=positions,
+                   use_cache=False, logits_to_keep=max(map(len, completions)))
+    results = []
+    for index, tokens in enumerate(completions):
+        logits = output.logits[index, -len(tokens):, :].float() / temperature
+        targets = torch.tensor(tokens, dtype=torch.long, device=logits.device)
+        logprobs = -F.cross_entropy(logits, targets, reduction="none")
+        with torch.no_grad():
+            entropy = []
+            for chunk in logits.detach().split(entropy_chunk_size):
+                log_p = torch.log_softmax(chunk, dim=-1)
+                entropy.append(-(log_p.exp() * log_p).sum(dim=-1))
+            entropy = torch.cat(entropy)
+            if not torch.isfinite(entropy).all():
+                raise FloatingPointError("Non-finite policy entropy")
+        results.append((logprobs, entropy))
+    return results
 
 
 class HFPolicy:
@@ -173,6 +250,9 @@ class HFPolicy:
                     logprobs = []
                     if behavior is not None:
                         logprobs = behavior[row_index][:len(generated)]
+                    truncated = bool(generated and generated[-1] not in eos
+                                     and len(generated) >= self.config["max_new_tokens_per_decision"])
                     results.append(Completion(self.tokenizer.decode(generated, skip_special_tokens=True),
-                                              prompt_ids, generated, logprobs, seed, len(prompts)))
+                                              prompt_ids, generated, logprobs, seed, len(prompts),
+                                              truncated=truncated))
         return results

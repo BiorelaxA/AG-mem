@@ -10,6 +10,8 @@ def validate_resume_config(previous, current, *, fork_retrieval=False, fork_id_p
     if fork_id_protocol and current["retrieval"].get("id_protocol") != "repair_v2":
         raise ValueError("ID protocol fork requires repair_v2")
     keys = ["reader", "retrieval", "reward", "training"]
+    if current.get("training", {}).get("algorithm") == "dapo":
+        keys += ["seed", "data", "models", "writer", "memory", "task_agent"]
     if fork_retrieval or fork_id_protocol:
         keys += ["seed", "data", "models", "writer", "memory"]
     for key in keys:

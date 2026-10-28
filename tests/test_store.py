@@ -114,7 +114,7 @@ class StoreTests(unittest.TestCase):
                     return Completion(json.dumps(action))
 
             class Agent:
-                def answer(self, example, evidence):
+                def answer(self, example, evidence, *, metadata=None):
                     return "Paris", "fixture"
 
             group = collect_group({"seed": 42, "training": {"advantage_epsilon": 1e-6}, "reward": {"read_call_cost": 0.01}},

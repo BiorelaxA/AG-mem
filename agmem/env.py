@@ -28,7 +28,7 @@ class MemoryEnvironment:
             raise ValueError("max_ids must be a positive integer")
         self.store, self.version = store, directory_version
         self.max_ids, self.max_calls, self.capacity = max_ids, max_calls, capacity
-        if id_protocol not in {"strict_v1", "repair_v2"}:
+        if id_protocol not in {"strict_v1", "repair_v2", "strict_v2"}:
             raise ValueError("Unknown retrieval.id_protocol")
         self.id_protocol = id_protocol
 
@@ -92,6 +92,13 @@ class MemoryEnvironment:
             if action["stop"]:
                 trajectory.termination_reason = "stop"
                 break
+            if self.id_protocol == "strict_v2":
+                error = self._strict_read(example, directory, entries, references,
+                                          evidence, trajectory, decision)
+                if not decision.tool_result["read_call_consumed"]:
+                    trajectory.termination_reason = "max_read_calls"
+                    break
+                continue
             if self.id_protocol == "repair_v2":
                 requested = action["ids"]
                 if not requested:
@@ -192,6 +199,94 @@ class MemoryEnvironment:
             trajectory.termination_reason = "max_decisions"
         trajectory.evidence = list(evidence.values())
         return trajectory
+
+    def _strict_read(self, example, directory, entries, references, evidence, trajectory, decision):
+        """Inspect the full action; fetch only unread, exact IDs in its allowed prefix.
+
+        Evidence is also the successful-read history for this rollout. A failed
+        capacity check never adds to that history, and prior records are never
+        fetched again. Historical protocols above deliberately keep their old
+        execution and reward semantics.
+        """
+        requested = decision.action["ids"]
+        unique = list(dict.fromkeys(requested))
+        invalid = [key for key in unique if key not in references]
+        already_read = [key for key in unique if key in evidence]
+        violations = decision.format_violations
+        if not requested:
+            violations.append("empty_ids")
+        if len(requested) > self.max_ids:
+            violations.append("too_many_ids")
+        if len(unique) != len(requested):
+            violations.append("duplicate_ids")
+        if invalid:
+            violations.append("unknown_id")
+        if already_read:
+            violations.append("repeated_read")
+        selected = list(dict.fromkeys(key for key in requested[:self.max_ids] if key in references))
+        result = {"ok": False, "requested_ids": requested, "selected_ids": selected,
+                  "records": [], "invalid_ids": invalid, "already_read_ids": already_read,
+                  "new_ids": [], "no_new_evidence": True, "read_call_consumed": False}
+        decision.tool_result = result
+        if len(requested) > self.max_ids:
+            result["ids_truncated"] = True
+
+        code = None
+        if trajectory.n_read_calls >= self.max_calls:
+            violations.append("read_budget_exceeded")
+            code = "max_read_calls"
+        else:
+            # Empty, invalid and entirely repeated requests still consume one call.
+            trajectory.n_read_calls += 1
+            result["read_call_consumed"] = True
+            records = []
+            for key in selected:
+                if key in evidence:
+                    continue
+                original = self.store.record(references[key])
+                records.append({k: original[k] for k in ("id", "source_session_id", "time", "order", "raw_text")}
+                               | {"content": entries[key]["content"]})
+            if records:
+                candidate = {**evidence, **{row["id"]: row for row in records}}
+                try:
+                    if self.capacity:
+                        self.capacity(reader_messages(example, directory, list(candidate.values()),
+                                                      max_ids=self.max_ids, id_protocol=self.id_protocol),
+                                      task_messages(example, list(candidate.values())))
+                except CapacityError:
+                    code = "context_capacity_exceeded"
+                else:
+                    evidence.update({row["id"]: row for row in records})
+                    result["records"] = records
+                    result["new_ids"] = [row["id"] for row in records]
+                    result["no_new_evidence"] = False
+
+        if code is None and violations:
+            codes = {"empty_ids": "invalid_batch_size", "too_many_ids": "too_many_ids",
+                     "duplicate_ids": "duplicate_ids_in_batch", "unknown_id": "unknown_or_unauthorized_id",
+                     "repeated_read": "repeated_read"}
+            code = codes[violations[0]]
+        result["read_calls_used"] = trajectory.n_read_calls
+        result["read_calls_remaining"] = max(0, self.max_calls - trajectory.n_read_calls)
+        if code is None:
+            result["ok"] = True
+            return None
+        # This feedback changes the next Reader state even when the attempted
+        # read adds no records. Partial successes and all violations stay auditable.
+        error = {"code": code, "requested_ids": requested, "invalid_ids": invalid,
+                 "already_read_ids": already_read, "new_ids": result["new_ids"],
+                 "no_new_evidence": result["no_new_evidence"],
+                 "read_call_consumed": result["read_call_consumed"],
+                 "read_calls_used": result["read_calls_used"],
+                 "read_calls_remaining": result["read_calls_remaining"],
+                 "format_violations": list(violations)}
+        if already_read:
+            error["message"] = ("The already_read_ids are already in retrieved_evidence; reuse that evidence. "
+                                "Request unread directory IDs only when needed, or stop.")
+        elif invalid:
+            error["message"] = "Copy IDs exactly from the current directory, including leading zeros and hashes."
+        result["error"] = error
+        return error
 
 
 def resolve_ids(ids, references):

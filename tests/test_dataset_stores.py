@@ -9,10 +9,10 @@ from unittest.mock import Mock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from agmem.core import Example, atomic_json, canonical, file_digest
+from agmem.core import Completion, Example, atomic_json, canonical, file_digest
 from agmem.data import ADAPTER_VERSION, clean_history
 from agmem.pipeline import (build_directories, dataset_configs, import_prepared,
-                            open_prepared, prepare, validate_directories)
+                            make_environment, open_prepared, prepare, validate_directories)
 from agmem.services import DirectoryBuilder
 from agmem.store import Store
 from agmem.workflow import make_workflow_configs
@@ -177,6 +177,80 @@ class DatasetStoreTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(ValueError, "inconsistent"):
                 validate_directories(changed, store, ["train"])
+        finally:
+            store.close()
+
+    def test_frozen_directory_reuses_original_writer_without_relabelling(self):
+        self.fixture_stores()
+        build_directories(self.config)
+        frozen = deepcopy(self.config)
+        frozen["retrieval"] = {"max_ids_per_call": 4, "max_read_calls": 8}
+        frozen["task_agent"] = {"max_context_tokens": None}
+        store = open_prepared(frozen)
+        frozen["data"]["frozen_directory_version"] = store.get_metadata("directory_version")
+        before = {p: p.read_bytes() for p in Path(frozen["data"]["prepared_root"]).glob("*/*.jsonl")}
+        try:
+            with patch("agmem.policy.model_fingerprint", return_value={"fingerprint": "new-machine-task-model"}):
+                with self.assertRaisesRegex(ValueError, "versions differ"):
+                    validate_directories(self.config, store, ["train", "validation"])
+                validate_directories(frozen, store, ["train", "validation"])
+                # Both initial training and validation create an environment
+                # after the early preflight. Exercise that previously missed
+                # path, and actually retrieve a record from the pinned cache.
+                for split in ("train", "validation"):
+                    example = store.examples(split)[0]
+                    first_id = store.memory(example.memory_id)[0]["id"]
+                    policy = SimpleNamespace(check_capacity=Mock(), complete=Mock(side_effect=[
+                        Completion(json.dumps({"ids": [first_id], "stop": False})),
+                        Completion(json.dumps({"ids": [], "stop": True})),
+                    ]))
+                    env = make_environment(frozen, store, policy)
+                    trajectory = env.run(example, policy, seed=42)
+                    self.assertEqual(env.version, frozen["data"]["frozen_directory_version"])
+                    self.assertEqual(trajectory.termination_reason, "stop")
+                    self.assertEqual([row["id"] for row in trajectory.evidence], [first_id])
+                    self.assertEqual(trajectory.evidence[0]["content"], "A useful summary.")
+                with self.assertRaisesRegex(ValueError, "versions differ"):
+                    make_environment(self.config, store, policy)
+            self.assertEqual(store.get_metadata("directory_service_identity")["model_revision"], "fixture-v1")
+            self.assertEqual(before, {p: p.read_bytes() for p in before})
+            with self.assertRaisesRegex(ValueError, "read-only"):
+                build_directories(frozen)
+            changed = deepcopy(frozen)
+            changed["writer"]["content_max_tokens"] = 200
+            with self.assertRaisesRegex(ValueError, "recorded Writer"):
+                validate_directories(changed, store, ["train"])
+            with self.assertRaisesRegex(ValueError, "recorded Writer"):
+                make_environment(changed, store, policy)
+            changed = deepcopy(frozen)
+            changed["data"]["frozen_directory_version"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "versions differ"):
+                validate_directories(changed, store, ["train"])
+        finally:
+            store.close()
+
+    def test_frozen_directory_still_rejects_missing_snapshots(self):
+        self.fixture_stores()
+        build_directories(self.config, limit=0)
+        store = open_prepared(self.config)
+        frozen = deepcopy(self.config)
+        frozen["data"]["frozen_directory_version"] = store.get_metadata("directory_version")
+        try:
+            with self.assertRaisesRegex(ValueError, "Directory missing"):
+                validate_directories(frozen, store, ["train"])
+        finally:
+            store.close()
+
+    def test_frozen_directory_rejects_published_empty_summaries(self):
+        self.fixture_stores()
+        self.writer.complete.return_value = ""
+        build_directories(self.config)
+        store = open_prepared(self.config)
+        frozen = deepcopy(self.config)
+        frozen["data"]["frozen_directory_version"] = store.get_metadata("directory_version")
+        try:
+            with self.assertRaisesRegex(ValueError, "empty or pending"):
+                validate_directories(frozen, store, ["train"])
         finally:
             store.close()
 

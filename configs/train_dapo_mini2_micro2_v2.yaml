@@ -1,0 +1,5 @@
+extends: train_dapo_micro2_v2.yaml
+# Two complete query groups (16 rollouts) per optimizer step; advantages stay per query.
+training:
+  mini_batch_groups: 2
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_mini2_micro2/train
