@@ -3,7 +3,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 
 DEFAULTS = {"writer_workers": 1, "task_agent_workers": 1,
-            "reader_batch_size": 1, "reader_batch_max_tokens": 16384}
+            "reader_batch_size": 1, "reader_batch_max_tokens": 16384,
+            "sampling_group_concurrency": 1}
 
 
 def execution_settings(config):
@@ -17,6 +18,15 @@ def execution_settings(config):
     if values["reader_batch_size"] > 8:
         raise ValueError("execution.reader_batch_size cannot exceed the group size (8)")
     return values
+
+
+def sampling_protocol(config):
+    """Generation batching changes the joint RNG stream and is part of a run."""
+    settings = execution_settings(config)
+    concurrent = settings["sampling_group_concurrency"] > 1
+    return {"scheduler": "ordered_group_windows_v1" if concurrent else "serial_groups_v1",
+            **{key: settings[key] for key in (
+                "sampling_group_concurrency", "reader_batch_size", "reader_batch_max_tokens")}}
 
 
 def bounded_results(function, items, workers):

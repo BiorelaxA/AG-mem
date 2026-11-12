@@ -1,0 +1,41 @@
+{
+  "format_version": 1,
+  "description": "Judge prompts used by the format05 training run; copied from the tracked pre-adaptation module, verified against run.json. LoCoMo Refined: CC-BY-NC-4.0; LongMemEval: MIT. See agmem/judge_prompts.py for attribution notices.",
+  "source_commit": "4070813da6c7f48dee8b751be5a3fc678f5a013c",
+  "templates": {
+    "locomo_refined": "Your task is to label an answer as ’CORRECT’ or ’WRONG’ given:\n(1) a question,\n(2) a gold (ground truth) answer,\n(3) a generated answer.\nCore principle — Inclusion + Non-contradiction\n- Be GENEROUS: if the generated answer clearly includes the gold’s key content (or a clear paraphrase of the same content) and does not contradict it, mark CORRECT — even if extra details are added.\n- Mark WRONG only when the generated answer does not include the gold’s content, changes it, or contradicts it.\nTIME (strict granularity; relative form equivalence; no calendar math)\n- Granularity must match exactly: HOUR↔HOUR, DAY↔DAY, MONTH↔MONTH, YEAR↔YEAR.\n  Do not answer a gold at a different time unit — even if the numeric value overlaps. Do not answer a month-level gold with a specific day, nor a year with a specific month/day/hour, etc.\n  (e.g., gold = \"July 26, 2019\" [DAY]; generated = \"2019-07-26 08:09:17\" [includes Second] → WRONG)\n- Do NOT convert relative ↔ absolute. If the gold uses a relative time expression, the generated answer must also use a relative form (or a clear paraphrase of that same form), not a computed date/range.\n- Treat harmless modifiers in relative forms (e.g., “the/last/previous/just prior”) as equivalent when both the anchor date and the time unit are the same.\n- Lists of DISTINCT facts:\n- If the gold answer lists multiple distinct facts (joined by \"and\", commas, or slashes), the generated answer must cover **all** of them.\n- Extra non-contradictory items **generally count as WRONG**.\n    - Example: gold = A, B, C ; gen = A, B, C → CORRECT\n    - Example: gold = A, B, C ; gen = A, B, C, D → WRONG\n- Exception: If a gold element is elaborated or split into finer details in the generated answer (e.g., C → C, C′), it is still considered CORRECT.\nPreference/Benefit Questions (e.g., \"what X likes/values most\")\n- If gold lists multiple reasons/aspects, the generated answer only needs to include **any one** of them without contradiction to be CORRECT.\n\nNow it's time for the real question:\nQuestion: {question}\nGold answer: {gold_answer}\nGenerated answer: {generated_answer}\n\nDo NOT include both CORRECT and WRONG in your response, or it will break the evaluation script.\n\nJust return the label CORRECT or WRONG in a json format with the key as \"label\":\n```json\n{{\n    \"label\": \"CORRECT\" or \"WRONG\"\n}}\n```\n",
+    "longmemeval_official": {
+      "single-session-user": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "single-session-assistant": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "multi-session": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "temporal-reasoning": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days.\nIf the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "knowledge-update": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "single-session-preference": "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
+      "abstention": "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
+    }
+  },
+  "upstream": {
+    "locomo_refined": {
+      "url": "https://github.com/mem-eval-suite/LoCoMo_refined/blob/main/src/llm_judge.py",
+      "license": "CC-BY-NC-4.0",
+      "retrieved": "2026-10-27"
+    },
+    "longmemeval_official": {
+      "url": "https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py",
+      "license": "MIT",
+      "retrieved": "2026-10-27"
+    }
+  },
+  "template_sha256": {
+    "locomo_refined": "fd44ba60ff07d28f4b44057a96a80cfbb45e2a7973dab7aae8051c7aabad06ea",
+    "longmemeval_official": {
+      "single-session-user": "4d2ba49c03f82b3ca73173a4794e3ca4845ace58e53710f5edbff5096048d010",
+      "single-session-assistant": "4d2ba49c03f82b3ca73173a4794e3ca4845ace58e53710f5edbff5096048d010",
+      "multi-session": "4d2ba49c03f82b3ca73173a4794e3ca4845ace58e53710f5edbff5096048d010",
+      "temporal-reasoning": "de374606fc3da4935b5e69b6eb08c8773d2c37a1ecffb0083f73a241376dae01",
+      "knowledge-update": "183a9b3a6197ec620940f610cdc1207201ec98c1113dd633ea685cfc322fafac",
+      "single-session-preference": "741ee3bcbea7ff5e8ed359acef61d2f8ded3de021bbcff6ee13de455f2e2aa9b",
+      "abstention": "5c0b365a1e1d06db36377c735432b56e122ca3c428f89faf61d43a0d5a7e050b"
+    }
+  }
+}

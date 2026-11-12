@@ -167,14 +167,17 @@ class IndependentJobTests(unittest.TestCase):
                 atomic_json(train_dir / 'run.json', {'config': self.config})
             else:
                 order.append(('test',))
+                test_config = load_config(args[args.index('--config') + 1])
+                self.assertEqual(test_config['data']['sources'], self.config['data']['sources'])
                 self.assertEqual(args[args.index('--split') + 1], 'test')
                 self.assertIn(str(train_dir / 'checkpoint-00000001/model'), args)
                 output = Path(args[args.index('--output') + 1])
                 atomic_json(output / 'metrics.json', {'fixture': True})
         with patch('agmem.jobs.build_source', side_effect=build), patch('agmem.jobs.run_logged', side_effect=run):
             train_and_test(self.config, self.job / 'config.yaml', self.job)
-        self.assertEqual(order, [('build', 'locomo', False), ('build', 'split_longmemeval_s', False), ('train',),
-                                 ('build', 'locomo', True), ('build', 'split_longmemeval_s', True), ('test',)])
+        sources = self.config['data']['sources']
+        self.assertEqual(order, [('build', s, False) for s in sources] + [('train',)]
+                         + [('build', s, True) for s in sources] + [('test',)])
         self.assertTrue((train_dir / 'train.complete').exists())
         self.assertTrue((train_dir.parent / 'evaluation.complete.json').exists())
         # A repeated job skips committed training/evaluation, but validates dirs.
@@ -183,7 +186,11 @@ class IndependentJobTests(unittest.TestCase):
         with patch('agmem.jobs.build_source', side_effect=build), patch('agmem.jobs.run_logged', side_effect=run), \
                 patch('agmem.jobs.open_prepared', return_value=store), patch('agmem.pipeline.validate_directories'):
             train_and_test(self.config, self.job / 'config.yaml', self.job)
-        self.assertEqual(order, [('build', 'locomo', True), ('build', 'split_longmemeval_s', True)])
+        self.assertEqual(order, [('build', s, True) for s in sources])
+
+    def test_locomo_only_job_keeps_longmemeval_out_of_training_and_test(self):
+        self.config['data']['sources'] = ['locomo']
+        self.test_train_job_builds_only_ls_then_trains_then_builds_test_and_evaluates()
 
     def test_failed_training_does_not_mark_complete_or_start_test(self):
         with patch('agmem.jobs.build_source') as build, patch('agmem.jobs.run_logged', side_effect=RuntimeError('train failed')):

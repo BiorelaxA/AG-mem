@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run inside a Slurm allocation. Submit serve_qwen35_4b.sbatch from the repo root.
+# Run inside a Slurm allocation. Submit serve_qwen35_4b.sbatch (3 GPUs) or
+# serve_qwen35_4b_1gpu.sbatch (1 GPU) from the repo root.
 # Touch runs/serve_qwen35_4b_JOBID/STOP_SERVING to release model memory while
 # keeping the allocation alive for a subsequent training step.
 agmem_serve_qwen35_4b() {
@@ -10,6 +11,11 @@ agmem_serve_qwen35_4b() {
     fi
 
     local project_dir model_dir run_dir conda_sh service_port server_pid=""
+    local expected_gpus=${AGMEM_EXPECTED_GPUS:-3}
+    if [[ ! $expected_gpus =~ ^[1-9][0-9]*$ ]]; then
+        echo "AGMEM_EXPECTED_GPUS must be a positive integer." >&2
+        return 1
+    fi
     local supervisor_pid=$BASHPID
     project_dir=${AGMEM_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
     cd "$project_dir"
@@ -48,7 +54,7 @@ agmem_serve_qwen35_4b() {
     hold_allocation() {
         touch "$run_dir/ALLOCATION_READY"
         echo "[$(date -Is)] Allocation retained until scancel or time limit."
-        echo "Enter it with: srun --jobid=$SLURM_JOB_ID --overlap --nodes=1 --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK:-16} --gres=gpu:4 --pty bash"
+        echo "Enter it with: srun --jobid=$SLURM_JOB_ID --overlap --nodes=1 --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK:-16} --gres=gpu:$expected_gpus --pty bash"
         while true; do
             sleep 30 &
             wait $!
@@ -83,6 +89,8 @@ agmem_serve_qwen35_4b() {
     export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
     # All model files are local; compute nodes need no Hugging Face connection.
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    # Avoid the FlashInfer sampler JIT using an older nvcc from the host.
+    export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
     if ! command -v setsid >/dev/null; then
         echo "ERROR: setsid is missing; cannot manage vLLM worker processes."
         service_failure 127 "$LINENO"
@@ -95,7 +103,7 @@ agmem_serve_qwen35_4b() {
     nvidia-smi
 
     # Check the actual allocation and local shards before starting workers.
-    service_port=$(python - "$model_dir" "${AGMEM_SERVICE_PORT:-0}" <<'PY'
+    service_port=$(python - "$model_dir" "${AGMEM_SERVICE_PORT:-0}" "$expected_gpus" <<'PY'
 import json
 from pathlib import Path
 import socket
@@ -103,8 +111,9 @@ import sys
 import torch
 
 model = Path(sys.argv[1]).resolve()
+expected_gpus = int(sys.argv[3])
 assert torch.cuda.is_available(), "CUDA is unavailable; check GPU node driver and PyTorch wheel"
-assert torch.cuda.device_count() == 4, f"Expected 4 allocated GPUs, got {torch.cuda.device_count()}"
+assert torch.cuda.device_count() == expected_gpus, f"Expected {expected_gpus} allocated GPUs, got {torch.cuda.device_count()}"
 for name in ("config.json", "tokenizer_config.json", "tokenizer.json", "model.safetensors.index.json"):
     assert (model / name).is_file(), f"Missing model file: {model / name}"
 index = json.loads((model / "model.safetensors.index.json").read_text())
@@ -115,16 +124,18 @@ assert 0 <= port <= 65535, "Invalid AGMEM_SERVICE_PORT"
 with socket.socket() as sock:
     sock.bind(("127.0.0.1", port))
     print(sock.getsockname()[1])
-print(f"PyTorch={torch.__version__}, CUDA={torch.version.cuda}, GPUs=4", file=sys.stderr)
+print(f"PyTorch={torch.__version__}, CUDA={torch.version.cuda}, GPUs={expected_gpus}", file=sys.stderr)
 PY
     )
     echo "$service_port" > "$run_dir/port.txt"
     echo "http://127.0.0.1:$service_port/v1" > "$run_dir/base_url.txt"
-    echo "Starting TP=4 service: http://127.0.0.1:$service_port/v1 (compute node only)"
+    # Serve on one GPU. With the original three-GPU recipe, Slurm retains
+    # the other two GPUs for later use; the single-GPU recipe allocates only one.
+    echo "Starting TP=1 service; $expected_gpus GPU(s) reserved: http://127.0.0.1:$service_port/v1 (compute node only)"
     setsid vllm serve "$model_dir" \
         --served-model-name agmem-4b \
         --host 127.0.0.1 --port "$service_port" \
-        --dtype bfloat16 --tensor-parallel-size 4 \
+        --dtype bfloat16 --tensor-parallel-size 1 \
         --distributed-executor-backend mp \
         --max-model-len "${AGMEM_MAX_MODEL_LEN:-32768}" \
         --max-num-seqs "${AGMEM_MAX_NUM_SEQS:-8}" \

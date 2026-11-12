@@ -115,7 +115,10 @@ class Store:
     ENTRY_FIELDS = ("id", "task_session", "actors_source", "time_order", "content")
     OPTIONAL_ENTRY_FIELDS = ("writer_status",)
 
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, memory_cache_size: int = 2):
+        if type(memory_cache_size) is not int or memory_cache_size < 1:
+            raise ValueError("memory_cache_size must be a positive integer")
+        self.memory_cache_size = memory_cache_size
         self.root = Path(root)
         if self.root.suffix in {".sqlite", ".sqlite3", ".db"}:
             raise ValueError("Store expects a JSONL directory; rerun prepare with the current configuration")
@@ -179,7 +182,7 @@ class Store:
             if value is None:
                 raise KeyError(memory_id)
             self._memory_cache[memory_id] = value["records"]
-            if len(self._memory_cache) > 2:
+            if len(self._memory_cache) > self.memory_cache_size:
                 self._memory_cache.popitem(last=False)
         self._memory_cache.move_to_end(memory_id)
         return self._memory_cache[memory_id]

@@ -1,0 +1,14 @@
+# Reuse every available summary verbatim; only missing sessions call local Qwen.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+model_path: /share/home/wtma/model/qwen3.5-27b
+input_root: data/processed/query_dedup_val10_seed42_20261018
+prepared_root: runs/locomo_longmemeval/prepared_longmemeval_completed
+reuse_train_root: runs/locomo_longmemeval/prepared
+reuse_test_roots:
+  - root: runs/evaluation/longmemeval_gpt5mini/prepared_test
+    label: gpt-5-mini
+  - root: runs/evaluation/format05_best_final/prepared_test
+    label: qwen3.5-27B
+writer_workers: 48
+timeout_seconds: 600
+retries: 3

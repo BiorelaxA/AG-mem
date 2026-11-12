@@ -1,16 +1,52 @@
 # AG-Mem
 
-2026-10-28：现有四卡作业内执行 `python -u -m agmem.four_gpu`，默认使用 `configs/train_dapo_locomo_s_v2.yaml`，输出至 `runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2/train/`。新 DAPO 奖励为 `2J-1-0.01n-0.1f`，其中 `J` 由 Qwen3.5-27B Judge 二元判定，答对或答错均扣读取成本；全对、全错 group 均过滤。`strict_v2` 将重复读取计入整条轨迹最多一次的格式惩罚，只返回新证据并反馈调用预算。每轮 32 个候选 group、每题 8 条 rollout，补采收集 16 个有效 group；默认 mini/micro 仍为 1/1，另提供真实 micro=2 与 mini=2 的独立试验配置。D 默认关闭，可独立开启只记录模式；TensorBoard 继续记录 `train/entropy`，并新增重复读取、无新证据和累计训练 group 指标。每 25 次 optimizer step 验证并保存 checkpoint。新配置尚未进行实际 GPU 复测，代码修改不会自动重启现有训练。检查、启动、续训及指标说明见 [DAPO 训练说明](doc/dapo_judge_training.md)。
+2026-11-04：LoCoMo Judge 改为按 gold 的必要语义判分。时间题接受有明确基准的相对／绝对日期转换及两者并列；额外的不矛盾细节或列表项不扣分。遗漏必要事实、时间换算错误或与 gold 矛盾仍判错。模板 SHA256 和缓存作用域随之更新；已启动的训练进程仍使用启动时加载的规则。
 
-`python -m agmem.four_gpu --check-only` 可在不加载 GPU 模型的情况下检查输入。旧 DAPO v1 配置 `configs/train_dapo_locomo_s_4x80gb.yaml` 与旧 GRPO 配置 `configs/train_locomo_s_4x80gb.yaml` 均保留，使用 `--train-config` 显式选择以复现实验；以下历史 GRPO 配置及奖励说明不代表新的 DAPO v2 默认行为。
+2026-11-03：四卡入口默认使用 `configs/train_dapo_reader_loop_v3_query9010_format05.yaml`，训练、验证和测试均只使用 LoCoMo，启用 `reader.prompt_version: evidence_loop_v3`。单次最多读取 **1 个 ID**，每次返回原文后再次调用 Reader，整题最多 **8 次 READ**。每一步输入都有 `max_ids_per_call`、`read_calls_used`、`read_calls_remaining`，并继续展示累计 `read_ids` 与绑定的原文。Reader 根据还缺哪些事实决定继续读取或 STOP，不要求用完预算。
+
+采样继续以最多 4 个 group 的固定有序窗口并发，每题保留完整 8 条 rollout；Reader 最多合批 4 个 decision，token 预算 16384，长上下文拆成更小批次且不截断；两个评分 worker 并发执行 Task Agent → Judge。当前窗口全部完成后才进入下一窗口。每轮最多 32 个候选，按原候选顺序选前 16 个有效 group，凑齐后完成当前窗口并停止补采，含首轮最多采样 4 轮。采样和评分全部结束后，按 mini=8、micro=2 更新 2 次，每次更新使用 8 个 group、共 64 条 rollout；多决策轨迹与 token 预算会影响实际 backward 次数，不能将其固定理解为每组 4 次。
+
+继续检索时必须提供 1 个 ID；请求 2 个及以上时记录 `too_many_ids`，只尝试读取原列表第一个 ID，后续 ID 不读取，也不加入 `read_ids`。保留原有 format 计数规则，其中超量、同批重复、无效 ID 和已读 ID 逐 ID 计数：每个违规 ID 出现位置扣 0.5，同一位置触犯多条规则只扣一次；同批重复从第二次出现开始计罚。合法 stop 不读取 ID、也不因其 ID 列表长度扣分。Reader prompt、环境执行和 reward 判定共用 `retrieval.max_ids_per_call=1`。
+
+奖励使用 `judge_cost_v2` 和 `reward.format_penalty_mode: per_id`：`R=2J-1-0.01N_read-0.5(N_bad_id+N_other)`，答对、答错都按消耗的 READ 调用数扣 0.01；空列表、无效 ID、重复读取和容量拒绝只要消耗调用也计入 cost，STOP 和超预算未执行的请求不新增调用成本。`N_bad_id` 是超出单次上限、同批重复（第二次及以后）、目录中不存在或已经成功读过的 ID 出现次数；同一 ID 位置满足多项条件只计一次。JSON/schema、空列表、超预算等其他原有 format 违规按动作扣 0.5，计入 `N_other`，与违规 ID 数相加；同一动作中的其他违规最多计一次。例如超预算并请求 3 个已读 ID，扣超预算 0.5 加 3 个违规 ID 的 1.5，共 2.0。四类 ID 违规不额外叠加统一动作惩罚。合法 STOP 忽略 ID 列表。
+
+Qwen3.5-27B Judge 给出二元 `J`。新 `filter_metric=judge_or_all_correct_format` 保留两类 group：实际可训练轨迹中既有答对也有答错；或完整 group 全对，且实际可训练轨迹中同时存在零 format 扣分与有 format 扣分的轨迹。全错、仅调用成本不同的全对、全部都有 format 扣分的全对组仍过滤。差异标准差须超过 `filter_min_std=1e-6`，且存在非零 advantage；只有截断或空 token 轨迹提供差异的组不纳入。有效组保存完整 8 条轨迹，advantage 仍在完整 group 上计算。Writer 和 Task Agent 的 prompt 不变，Judge 使用上文更新的语义判分规则，D 默认关闭。每 4 次 optimizer step 验证并保存 checkpoint，即 mini=8 时累计完成 2 批、32 个有效 group 后验证；额外周期 checkpoint 每 25 步保存。`sampling/accepted_all_correct_format_rate` 记录通过新分支的组占全部候选的比例，`sampling/pipeline_round_*` 记录流水线统计。正常 HTTP 完成先后不改变 Reader 合批及候选选择；故障重试不承诺逐 token 复现。
+
+LoCoMo 将原训练集与验证集合并后，按精确 query 字符串去重分组，以 seed=42 随机打乱，按 9:1 重新划分。共 1,134 条记录、1,126 个不同 query；验证 query 数向上取整为 113，训练为 1,013 个 query。对应训练 1,019 条、验证 115 条，相同 query 的全部记录始终在同一侧，不删除重复记录。LoCoMo test 的 400 条记录逐字节保留；当前实验的训练、验证和测试均仅选择 `data.sources: [locomo]`，LongMemEval-S 不参与采样、评分或指标汇总；其历史数据文件保留。新配置复用该数据划分、prepared 与 Writer 结果。
+
+若旧实验仍在运行，先在原启动终端按 Ctrl+C，等待其训练与服务进程退出；保留现有四卡 Slurm 作业，不执行 `scancel`。然后在该四卡作业内、项目根目录检查并启动新实验：
+
+```bash
+conda activate agmem
+python -m agmem.four_gpu --train-config configs/train_dapo_reader_loop_v3_query9010_format05.yaml --check-only
+python -u -m agmem.four_gpu --train-config configs/train_dapo_reader_loop_v3_query9010_format05.yaml
+```
+
+`--check-only` 不加载 GPU 模型。新输出目录为 `runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train/`。新实验从初始4B权重开始，不加 `--resume`；旧 reward/filter 的 checkpoint 不能直接切换到新配置续训。原 `query9010_id_cost` 及其 restart/windowstop 配置保留 0.1 惩罚和混合 Judge 过滤，供旧实验恢复。正在运行的进程不会热加载新配置。
+
+迁移到其他机器后，在旧 val100 数据与 prepared 已就绪且新输出目录尚不存在时运行：
+
+```bash
+python -m agmem.query_resplit \
+  --config configs/train_dapo_reader_loop_v3_val100.yaml \
+  --fraction 0.1 --seed 42 \
+  --output-data data/processed/locomo_query9010_seed42_20261102 \
+  --output-prepared runs/locomo_longmemeval/prepared_locomo_query9010_seed42_20261102
+```
+
+`manifest.json` 记录划分规则、query/记录数量及文件哈希；`row_mapping.jsonl` 保存每条记录对应的原 split 和行号。工具逐字段校验 Parquet 内容与 schema，并更新 prepared 样本 ID、记忆映射及来源信息，不调用模型。
+
+旧实验可显式使用原配置，例如 `--train-config configs/train_dapo_max1_no_call_cost_mixed_v2.yaml --resume`；只有新实验自身的checkpoint才能使用新默认配置续训。以下历史GRPO配置和奖励说明不代表当前默认行为。检查、续训及指标解释见 [DAPO训练说明](doc/dapo_judge_training.md)。
 
 新增独立 A100 入口：`scripts/build_directories_all_a100.sbatch` 申请 1 张 `a100-sxm4-80gb`，单卡部署 27B，从 LongMemEval-M 开始为除 LoCoMo/S 外的七个来源构建目录；`scripts/train_eval_locomo_s_a100.sbatch` 申请 4 张 A100 40GB 卡，其中两张分层运行 Reader 全参 GRPO，另外两张部署 27B，负责 LoCoMo/S 的目录、训练和测试。两个任务按来源加锁共享缓存，test 使用独立存储。提交与结果路径见 [独立任务说明](doc/independent_a100_jobs.md)。
 
-当前首轮实验仅使用 LoCoMo 与 LongMemEval-S；LongMemEval-M 暂缓构建。`configs/pilot.yaml` 保留三种可选数据源，`configs/pilot_workflow.yaml` 独立选择目录构建和训练来源。支持按数据集独立准备、构建和续跑，训练时汇总选定来源，train 与 validation 保持分开。已有集中存储可以迁移复用摘要。操作与共享历史审计见 [按数据集构建说明](doc/dataset_directory_workflow_20261022.md)。
+以下为历史 pilot 配置说明，其 LoCoMo＋LongMemEval-S 来源选择不代表当前仅 LoCoMo 的 DAPO 默认配置。`configs/pilot.yaml` 保留三种可选数据源，`configs/pilot_workflow.yaml` 独立选择目录构建和训练来源。支持按数据集独立准备、构建和续跑，训练时汇总选定来源，train 与 validation 保持分开。已有集中存储可以迁移复用摘要。操作与共享历史审计见 [按数据集构建说明](doc/dataset_directory_workflow_20261022.md)。
 
 pilot 脚本支持 `AGMEM_STAGE=build|train|all`（默认 all），默认完成 LoCoMo/S 目录后立即训练这两部分，结果保存到 `runs/locomo_longmemeval/experiments/locomo_s/train/`。后续 M-only 与三来源实验分别使用 `configs/pilot_workflow_m.yaml`、`configs/pilot_workflow_all.yaml`。
 
-已支持 Writer 并发、Reader 小批量 rollout 与 Task Agent 并发评分，默认各为 2；目录缓存可复用，group 仍固定 8 条后统一更新。参数、sbatch 覆盖和串行回退见 [并发执行说明](doc/concurrency_20261023.md)。
+目录缓存可继续复用。旧脚本的 Writer、Reader 与 Task Agent 并发覆盖见 [并发执行说明](doc/concurrency_20261023.md)；当前四卡 DAPO 的跨 group 窗口与 mini/micro 设置以 [DAPO 训练说明](doc/dapo_judge_training.md) 为准。
+
+以下为历史 GRPO 配置说明，奖励与单次格式扣分规则不代表当前默认 DAPO 配置。
 
 目录引导的多步记忆检索与 Reader 全参 GRPO。Reader 使用本地 Qwen3.5-4B；冻结的 Qwen3.5-27B 共用一个服务，分别承担离线 Writer 和 Task Agent。
 
@@ -47,15 +83,23 @@ python -m pip check
 
 换机器运行见 [Git 提交与迁移说明](doc/migration.md)。仓库保存代码、配置和固定划分清单；Parquet 数据、prepared JSONL、模型权重和运行输出不随 Git 提交，需要单独同步或重建。
 
-## 超算四卡部署 Qwen3.5-4B，并复用作业训练
+## 超算申请 GPU 并部署 Qwen3.5-4B，复用作业
 
-在登录节点的项目根目录提交：
+只申请一张 GPU、运行两天时，在登录节点的项目根目录提交：
+
+```bash
+sbatch scripts/serve_qwen35_4b_1gpu.sbatch
+```
+
+[单卡脚本](scripts/serve_qwen35_4b_1gpu.sbatch) 申请 `gpu02` 分区单节点、1 张 GPU、8 个 CPU、48G 主机内存、48 小时 (`2-00:00:00`)，以 TP=1 部署本地 Qwen3.5-4B。共享部署脚本按申请卡数进行预检，默认设置 `VLLM_USE_FLASHINFER_SAMPLER=0`，避免采样器 JIT 使用旧版 nvcc。单卡作业的终端入口使用 `srun --jobid=<作业ID> --overlap --nodes=1 --ntasks=1 --gres=gpu:1 --pty bash`。日志与状态文件路径和下文一致。
+
+保留三张 GPU 供后续训练时，提交原三卡脚本：
 
 ```bash
 sbatch scripts/serve_qwen35_4b.sbatch
 ```
 
-[提交脚本](scripts/serve_qwen35_4b.sbatch) 当前申请 `gpu02` 分区单节点、4 张 GPU、16 个 CPU、120G 主机内存、5 天 (`5-00:00:00`)；由调度器选择节点。需要 6 天时可以使用 `sbatch --time=6-00:00:00 scripts/serve_qwen35_4b.sbatch` 覆盖。实际可获批的时限由分区与账户限制决定。[部署脚本](scripts/serve_qwen35_4b.sh) 默认激活 `$HOME/miniconda3` 下的 `agmem` 环境，读取相对项目根目录的 `../model/qwen3.5-4b`，保留 Slurm 分配的 GPU 编号，以 vLLM TP=4、BF16、32768 上下文、纯文本模式启动 `agmem-4b` 服务。
+[提交脚本](scripts/serve_qwen35_4b.sbatch) 当前申请 `gpu02` 分区单节点、3 张 GPU、16 个 CPU、120G 主机内存、3 天 (`3-00:00:00`)；由调度器选择节点。需要 6 天时可以使用 `sbatch --time=6-00:00:00 scripts/serve_qwen35_4b.sbatch` 覆盖。实际可获批的时限由分区与账户限制决定。[部署脚本](scripts/serve_qwen35_4b.sh) 默认激活 `$HOME/miniconda3` 下的 `agmem` 环境，读取相对项目根目录的 `../model/qwen3.5-4b`，保留 Slurm 分配的 GPU 编号，以 vLLM TP=1、BF16、32768 上下文、纯文本模式启动 `agmem-4b` 服务。该模型的 16 个注意力头不支持 TP=3，因此服务运行在一张 GPU 上，其余两张仍由这个 Slurm 作业保留。
 
 日志和状态保存在 `runs/serve_qwen35_4b_<作业ID>/`：`job.log` 是控制日志，`vllm.log` 是服务日志，`node.txt` 与 `port.txt` 记录节点和端口，`READY` 表示服务健康检查通过。服务仅监听计算节点的 `127.0.0.1`，默认自动选择空闲端口；可在提交时通过 `AGMEM_SERVICE_PORT=8000 sbatch ...` 指定。其他覆盖变量包括 `AGMEM_CONDA_SH`、`AGMEM_CONDA_ENV`、`AGMEM_MODEL_PATH`、`AGMEM_MAX_MODEL_LEN`、`AGMEM_MAX_NUM_SEQS` 和 `AGMEM_GPU_MEMORY_UTILIZATION`。
 
@@ -77,15 +121,15 @@ tail -f "runs/serve_qwen35_4b_${job_id}/job.log"
 看到 `TRAINING_READY` 后按 Ctrl+C 退出 tail；脚本已经停止服务进程组，主作业继续保留资源。使用同一作业进入计算节点（`--overlap` 允许与仍在等待的 batch 步骤共享已分配资源）：
 
 ```bash
-srun --jobid="$job_id" --overlap --nodes=1 --ntasks=1 --cpus-per-task=16 --gres=gpu:4 --pty bash
+srun --jobid="$job_id" --overlap --nodes=1 --ntasks=1 --cpus-per-task=16 --gres=gpu:3 --pty bash
 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 conda activate agmem
 cd /share/home/wtma/AG-mem
 nvidia-smi
-# 在此运行训练命令；进程可见该作业分配的 4 张 GPU。
+# 在此运行训练命令；进程可见该作业分配的 3 张 GPU。
 ```
 
-模型部署的 TP=4 不会自动让训练代码使用四卡；训练并行方式和 Reader/Task Agent 分卡仍由训练入口配置。退出交互 shell 后主作业继续等待；训练完成后，在登录节点执行 `scancel "$job_id"` 释放整个作业。时限从原作业开始运行时计算，切换训练不会重置计时。
+训练并行方式和 Reader/Task Agent 分卡仍由训练入口配置；使用这个作业时，训练入口需要支持三张 GPU。退出交互 shell 后主作业继续等待；训练完成后，在登录节点执行 `scancel "$job_id"` 释放整个作业。时限从原作业开始运行时计算，切换训练不会重置计时。
 
 环境缺少 vLLM、GPU 检查失败、服务异常退出或启动超时时，会记录 `SERVICE_FAILED`，清理服务进程后继续保留作业；`ALLOCATION_READY` 表示已进入保留资源状态。此时可直接用上述 `srun --jobid` 进入节点修复环境或运行训练。服务不会自动重启，修好后可在交互 shell 中手动执行 `vllm serve`。服务成功运行时仍通过 `STOP_SERVING` 切换到训练。`scancel` 和作业时限到达都会正常结束作业。脚本尚需实际 GPU 节点验证。
 
@@ -301,7 +345,7 @@ CPU offload 显著使用主机内存、传输与磁盘；4B 全参的 master/mom
 
 `runs/.../groups/*.json.gz` 保存完整轨迹和状态指纹；`train_metrics.jsonl` 保存更新、F1、调用成本、方差和 logprob 差异指标；评估目录保存逐样本 episodes 和按来源/总体/来源平均的指标。指标是本地划分的标签或文本 F1、reward 和成本，尚未接入各 benchmark 额外的官方 Judge 协议，也未接入下一阶段 MemoryArena 环境。
 
-每个训练 group 还自动保存一份便于查看的精简轨迹：`runs/.../rollouts/group-00000000.json`（与完整 group 文件使用相同的从零开始编号）。`rollouts` 数组中每条包含 `reader_steps`：逐轮记录 `reader_output`（原始输出，含可能的格式错误）与 `action`（解析成功的 `ids`、`stop`，失败为 null）；`task_agent_output` 是 Task Agent 的最终答案。同时保留样本 ID、结束原因、F1 和 reward；新运行额外记录 `outcome_reward`、`raw_read_cost`、`read_cost`、`format_failure`、`format_reward`。精简文件不包含输入 prompt、目录内容、检索原文、token IDs 或 logprob；完整审计文件仍保留。
+每个训练 group 还自动保存一份便于查看的精简轨迹：`runs/.../rollouts/group-00000000.json`（与完整 group 文件使用相同的从零开始编号）。`rollouts` 数组中每条包含 `reader_steps`：逐轮记录 `reader_output`（原始输出，含可能的格式错误）与 `action`（解析成功的 `ids`、`stop`，失败为 null）；`task_agent_output` 是 Task Agent 的最终答案。同时保留样本 ID、结束原因、F1 和 reward；新运行额外记录 `outcome_reward`、`raw_read_cost`、`read_cost`、`format_failure`、`format_violation_count`、`format_reward`；`format_violation_count` 在当前 `per_id` 配置中是违规 ID 出现次数加其他 format 违规动作数；历史 `per_decision` 配置中是违规动作数。精简文件不包含输入 prompt、目录内容、检索原文、token IDs 或 logprob；完整审计文件仍保留。
 
 已完成的训练可以补导出，无需模型、GPU 或重跑训练：
 
@@ -472,3 +516,419 @@ hf download 你的用户名/agmem-data \
 ### Reader ID 修复协议与 checkpoint 100 续跑
 
 2026-10-26 新实验使用 `configs/resume_locomo_s_idrepair.yaml`，显式启用 `repair_v2`。有限补零修复、保留同批有效记录、重复无效调用终止均保留原始采样文本；协议违规每条 rollout 最多扣 0.1。旧配置缺省仍为 `strict_v1`。新分支恢复模型和优化器，并先评估新协议下的 step 100 基线，再从 step 101 继续。执行命令、审计字段及后续续跑说明见 [Reader ID 协议 v2](doc/reader_id_protocol_v2.md)。
+
+### Checkpoint 20/32 的 LoCoMo / LongMemEval-S 测试
+
+配置入口为 `configs/eval_locomo_longmemeval_checkpoints.yaml`。评估读取已保存的训练 `run.json`，固定 Reader prompt、每次 1 个 ID、最多 8 次 READ、Task prompt，以及本地 Qwen3.5-27B Judge。`configs/protocols/format05_training_judge.json` 精确保存该轮训练使用的 Judge 模板；不会覆盖当前训练代码中修改后的模板。
+
+本次使用仓库的固定 test split：LoCoMo 400 个问题、LongMemEval-S 150 个问题（不是 LongMemEval-S 全部 500 个问题）。LoCoMo 的 10 份历史与训练历史完全相同，可复用原目录；这是按 query 留出的测试，不是未见历史测试。LongMemEval-S 的 150 份测试历史需要用本地 Qwen 构建 7,163 个 session 目录项。准备数据独立保存在 `runs/evaluation/format05_best_final/prepared_test/`，不会写回训练 Store。
+
+在已有四卡 allocation 的 GPU 节点、项目根目录执行：
+
+```bash
+conda activate agmem
+python -u -m agmem.evaluate_gpu --task-agents local
+```
+
+默认配置为 `task_agents: [local]`，GPU 节点不需要外网或 OpenAI 凭据。`export_remote_inputs: true` 会在每个 checkpoint 的本地评测完成后导出同一批 Task 输入，供联网机器单独运行 GPT；远端不可用不会阻止下一个 checkpoint 的本地评测。
+
+默认配置启用 `parallel_directory_build: true`。在 `--stage all` 且选择两个数据集时，启动器使用 `CUDA_VISIBLE_DEVICES` 中的四张卡并行分工：第 1 张运行 Qwen Writer，续建 LongMemEval-S 测试目录；第 2、3 张运行 Reader；第 4 张运行另一个 Qwen 服务，处理 LoCoMo 的 Task 和 Judge。LoCoMo 优先评测全部选中的 checkpoint，不等待 LongMemEval-S 目录构建。两项任务都完成后，Reader 和 Task/Judge 自动转入 LongMemEval-S 评测。
+
+该模式可显式指定 `--parallel-directories`；`--no-parallel-directories` 使用原来的顺序流程。只选一个数据集或使用分阶段命令时，第 1 张卡仍预留，评测使用第 2、3、4 张卡。启动器只关闭自己启动的进程，不终止其他任务或 Slurm allocation。`--local-base-url http://127.0.0.1:PORT/v1` 可以复用 Task/Judge 服务，并行目录构建仍使用第 1 张卡上的独立 Writer。
+
+#### GPU 无外网时：本地评测 → GPT 回答 → 本地 Judge
+
+先完成 LoCoMo 两个 checkpoint 的本地评测。已完成的 best/checkpoint 20 会直接复用，缺失的 final/checkpoint 32 会继续运行：
+
+```bash
+python -u -m agmem.evaluate_gpu --datasets locomo --task-agents local
+```
+
+如果现有任务已经在 GPU 3 部署了 Task/Judge Qwen，应在命令末尾添加 `--local-base-url http://127.0.0.1:PORT/v1`，填入该任务日志里的端口，复用现有服务。只选 LoCoMo 不占用 GPU 0，可以让已有 LongMemEval-S 目录构建继续执行；不要在占用中的 GPU 3 上启动第二个 Qwen 服务。
+
+每个本地组合完成后，输入包位于：
+
+```text
+runs/evaluation/format05_best_final/results/best/locomo/offline/requests.json.gz
+runs/evaluation/format05_best_final/results/final/locomo/offline/requests.json.gz
+```
+
+旧版本已完成的本地结果也可以只补导出，无需 GPU、网络或重新运行模型：
+
+```bash
+python -u -m agmem.evaluate_checkpoints --stage export-remote --datasets locomo
+```
+
+把这两个包分别复制为联网机器上的 `best_requests.json.gz`、`final_requests.json.gz`，同时复制 `agmem/remote_task_runner.py`。该脚本仅依赖 Python 标准库，不需要整个仓库、GPU、模型权重或训练数据。在联网机器执行：
+
+```bash
+read -rsp 'OPENAI_API_KEY: ' OPENAI_API_KEY
+export OPENAI_API_KEY
+export OPENAI_BASE_URL='https://YOUR_ENDPOINT/v1'
+python remote_task_runner.py --requests best_requests.json.gz \
+  --output returned/best/locomo --workers 4
+python remote_task_runner.py --requests final_requests.json.gz \
+  --output returned/final/locomo --workers 4
+```
+
+每个 checkpoint 使用自己缓存的 Reader 证据；导出会核对与本地 Qwen 使用的 Task 输入哈希一致。包内只包含请求所需的问题、原文证据和协议元数据，不包含 gold answer、本地 Qwen 回答或 Judge 标签。联网步骤只生成 GPT 回答，不重新运行 Reader，也不评分。每题成功后立即保存，网络失败可原命令续跑；空回答不会当作错误答案入分，非空但截断的回答按原训练/评测规则保留截断标记。
+
+GPT 的 `max_completion_tokens` 包含推理 token。联网脚本首次仍按输入包请求 512 tokens；只有实际收到“正文为空、`finish_reason=length`”的响应时，才按 512 → 2,048 → 8,192 → 16,384 逐级扩大预算重试。CLI 的 `--empty-answer-max-tokens` 默认 16,384。`--retries 3` 指每个 token 档位最多三次普通错误重试，预算扩容独立计数：即使前三次网络失败、第四次才返回空正文，也仍然会进入 2,048 档位，并重新获得该档位的普通重试额度。其他错误不会扩大预算；达到最高档位仍失败时会明确报错，不会无限重试。此策略写入响应 manifest，每条回答记录实际请求预算，导回 Judge 后仍保留该信息。旧的成功回答原样保留，首次续跑会在运行锁内升级 manifest，并校验旧回答的原始签名。它是显式的空回答重试策略，不代表 GPT 与本地 Qwen 有相同的可见输出 token 上限。
+
+请求开始、失败原因、HTTP 状态和 token 用量会写入对应 `responses/events.jsonl`，不记录密钥或原文。等待期间每 30 秒输出在途 query 和已等待时间；某题彻底失败会立即报告，然后保存其余在途请求的成功结果再退出。诊断时可用 `--timeout 120` 缩短单次 socket 等待；超时不是整个评测的时限。原脚本隐藏的 `ValueError` 现在会给出 `empty_text`、`invalid_usage` 等原因码。代码更新不会改变已启动进程，需待旧进程退出后再执行原命令；不要删除已保存的 responses 目录。
+
+把整个 `returned/` 目录复制回 GPU 节点后，沿用训练的本地 Qwen Judge 打分：
+
+```bash
+python -u -m agmem.evaluate_gpu --stage judge-remote --datasets locomo \
+  --responses-root /path/to/returned
+```
+
+如 Qwen 服务仍在运行，同样添加 `--local-base-url http://127.0.0.1:PORT/v1`。此阶段不加载 Reader，不调用远端 API，也不需要 OpenAI 凭据。省略 `--responses-root` 时，会分别从 `results/{best,final}/locomo/offline/responses/` 读取回答。每份回答必须与对应输入包、query、模型和检索版本一致；不完整或不匹配的返回包会被拒绝。评分结果保存到原有 `answers/remote/`，并加入 `results/summary.json` 和 `summary.csv`，可与 `answers/local/` 直接比较。
+
+也可以在准备好提交时使用单卡评分脚本：
+
+```bash
+sbatch scripts/judge_locomo_gpt.sbatch
+```
+
+该脚本申请 `gpu02` 分区 **1 张 GPU、8 小时、8 个 CPU**，部署本地 Qwen3.5-27B（TP=1），依次评分 step 20 和 step 32 的 LoCoMo GPT 回答，共 800 条。它复用 `configs/protocols/format05_training_judge.json`，并核对保存的训练 `run.json` 中的 Judge 模板哈希和评分协议；不会使用当前代码中另行修改的训练 Judge 模板。成功结果逐题保存，重启可续跑，完成后退出并释放本作业服务。Slurm 日志为 `agmem-gpt-judge-<作业ID>.out/.err`；逐题评分和指标仍写入 `results/{best,final}/locomo/answers/remote/`。脚本创建不会自动提交或申请资源。
+
+#### 单独使用 GPT-5-mini 作为 Judge
+
+`scripts/judge_locomo_gpt5mini.sh` 在联网 CPU/登录节点运行，只对已保存的 GPT Task 回答评分，不生成新答案、不运行 Reader，也不申请 GPU。它与本地 Qwen Judge 使用同一份冻结训练模板及相同的完整 gold 参考答案规则，Judge 模型则改为 GPT-5-mini。只向 Judge 发送问题、gold 和已有回答。
+
+```bash
+conda activate agmem
+# 可先检查 800 条回答和训练 prompt 哈希；不调用 API，也不需要凭据。
+bash scripts/judge_locomo_gpt5mini.sh --check-only
+
+read -rsp 'OPENAI_API_KEY: ' OPENAI_API_KEY
+export OPENAI_API_KEY
+export OPENAI_BASE_URL='https://YOUR_ENDPOINT/v1'
+bash scripts/judge_locomo_gpt5mini.sh --workers 4 --timeout 120 --retries 3
+```
+
+独立结果目录为 `runs/evaluation/format05_best_final/gpt_judge_results/{best,final}/locomo/answers/remote/metrics.json`，汇总为同根目录的 `summary.json` 和 `summary.csv`。原 Qwen Judge 结果仍在 `results/`，不会覆盖。逐题评分和每次有效 Judge 标签都会缓存，使用原命令可续跑；更换输入或 Judge 协议时需指定新的 `--output-root`。
+
+GPT Judge 为推理预留首次 2,048、最高 16,384 completion tokens，实际预算和 Judge 身份写入评分协议及调用记录。Judge 输出必须通过原严格标签解析器；空回答、被 `length` 截断的标签、非法 JSON 或无效标签不会被当作 WRONG。请求失败会记录诊断并保留成功进度。两个 Judge 的 prompt 一致，模型及生成参数分别明确记录，分数应按 Judge 分开比较。
+
+DNS、连接超时或一般 TLS 连接故障耗尽单轮重试后，默认再进行最多 6 轮网络恢复，轮间等待 30 秒、60 秒、60 秒……；可用 `--network-retries` 和 `--network-retry-delay` 调整，设 `--network-retries 0` 可关闭。恢复参数只影响执行并记录在事件日志中，不改变评分协议，已有评分可继续复用。原 `--retries 3` 同时控制标签重试并已写入评分协议，已有结果续跑时保持该值。认证错误、证书校验错误、无效标签及输出预算耗尽不会触发这层网络恢复。网络长期不可用时仍会明确报错，保留进度且不给失败题赋分；重试不能修复 DNS 或代理配置本身。
+
+#### 使用 History Chats / answer 标签模板重新评测
+
+`configs/eval_locomo_answer_tags.yaml` 为 Qwen3.5-27B 和 GPT-5-mini 选择同一个 `history_answer_v1` Task 模板，使用用户指定的 `History Chats: ... / Question: ...` 格式，要求答案包在 `<answer>...</answer>` 内。历史部分保留检索到的原始会话文字、人物和会话时间，不再加入目录摘要或要求补充相对/绝对日期。Judge 仍使用 `configs/protocols/format05_training_judge.json` 中的严格 LoCoMo-Refined 模板，已经与用户提供的全文逐字核对。
+
+在联网节点激活 `agmem` 并设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 后执行：
+
+```bash
+bash scripts/eval_locomo_gpt_answer_tags.sh
+```
+
+脚本先复用已有 step20/step32 检索轨迹导出新请求，再依次完成每个 checkpoint 的 GPT 回答和 GPT Judge 评分；无需 GPU，也无需先重跑 Qwen。默认并发 2，可通过 `AGMEM_EVAL_WORKERS` 调整。重新执行原命令会跳过已经完成的任务。回答原文保存在响应包及评分轨迹的 `task_completion.raw_text`，Judge 与 F1 只使用标签内的答案。无效/空/重复标签以及 `length` 截断不能被当作有效回答；GPT 初始预算 2048、最高 16384，预算扩容策略独立记录。
+
+新回答保存到 `runs/evaluation/format05_best_final/answer_tags/results/{best,final}/locomo/offline/responses/`，GPT Judge 汇总保存到 `runs/evaluation/format05_best_final/answer_tags/gpt_judge_results/summary.csv`。旧版结果仍在原目录；历史 prompt 契约保留以便读取和续跑旧任务。
+
+仅导出可在无网络、无 API 凭据环境运行：
+
+```bash
+python -u -m agmem.evaluate_checkpoints \
+  --config configs/eval_locomo_answer_tags.yaml --stage export-remote \
+  --datasets locomo --checkpoints best final
+```
+
+若之后重跑本地 Qwen，复用已部署的 Qwen3.5-27B 服务执行下列命令；同样不加载 Reader，生成的本地答案会采用新模板：
+
+```bash
+python -u -m agmem.evaluate_checkpoints \
+  --config configs/eval_locomo_answer_tags.yaml --stage score --task-agents local \
+  --datasets locomo --checkpoints best final \
+  --local-base-url http://127.0.0.1:PORT/v1
+```
+
+#### GPU 可以联网时：可选的直接远端评测
+
+远端 Task 使用标准 Chat Completions 接口，端点应包含服务要求的 `/v1` 前缀。凭据只从环境读取。默认模型为 `gpt-5-mini`；若服务采用其他名称，在导出或直接评测命令中用 `--remote-model MODEL_ID` 指定。远端请求不发送 vLLM 专用字段，默认省略 temperature，并用 `max_completion_tokens` 设置输出上限；该上限包含可见输出和推理 token。供应商参数差异可在 `remote_task` 中显式配置。只有显式选择 `remote` 时才会从 GPU 节点直接访问远端：
+
+```bash
+read -rsp 'OPENAI_API_KEY: ' OPENAI_API_KEY
+export OPENAI_API_KEY
+export OPENAI_BASE_URL='https://YOUR_ENDPOINT/v1'
+python -u -m agmem.evaluate_gpu --task-agents local remote
+```
+
+从旧的顺序评测切换时，在原终端停止旧启动器，等待它释放自己的 GPU 服务和锁，再运行上述命令。已经保存的 LongMemEval-S 目录项会直接复用；已有检索和评分也会跳过。不同数据集使用独立锁，可以同时构建和评测；同一数据集的 Store 操作仍互斥。背景目录失败会立即报告，但会让已启动的 LoCoMo 评测继续完成并保存结果。
+
+每个 checkpoint × 数据集只检索一次，两个 Task 模型使用相同的原文证据，默认评测流程使用本地 Qwen Judge；独立 GPT Judge 脚本另存评分结果。两者共享训练时的 Qwen tokenizer/65,536-token 证据容量检查；这不表示远端模型也具有相同的真实 token 上限。远端容量、网络或空回答错误会中断并保留进度，不会算作回答错误。
+
+评测并发由该 YAML 的 `evaluation_execution` 独立控制：默认同时推进 4 个 query，每次 Reader batch 最多 4 个决策，按 16,384 个 padded tokens 的预算自动拆批，长输入保持完整。本地 Task→Judge 有 2 个并发 query，远端 Task→Judge 有 4 个并发 query；同一道题先完成回答再评分，不同题的回答与 Judge 可以同时进行。本地 Qwen 服务仍最多同时处理 2 个请求，多余请求排队。
+
+默认 `--stage all` 中，一道题检索完成并保存后立即送入本地 Task 的评分池，Reader 在主线程继续推进其他题；本地评测全部完成后导出 GPT 输入。显式选择多个 Task 模型时，第二个 Task 模型复用已保存证据并发评分。各评测组合依次使用 Reader，另一张卡上的目录构建同时进行。每题仍一次 READ 1 个 ID；并发不增加单题检索预算。更改并发数可以继续复用已有结果，运行设置另存于 `executions/`，逐步轨迹记录实际 Reader batch 大小。greedy 批处理可能存在浮点差异，不承诺和逐题推理逐 token 完全一致。
+
+所有阶段可重入；逐样本原子保存，不重复执行已经完成的结果。更改模型、目录、数据、prompt 或评分协议时，已有输出会拒绝混用，需要在配置中指定新的 `output_root`。常用分阶段命令：
+
+```bash
+# CPU：准备测试数据、复用已有目录，不调用模型。
+python -u -m agmem.evaluate_checkpoints --stage prepare
+# GPU：仅构建缺失目录。
+python -u -m agmem.evaluate_gpu --stage build
+# 仅运行 Reader，缓存两 checkpoint 的测试检索证据。
+python -u -m agmem.evaluate_gpu --stage retrieve
+# 已有检索结果后，仅补远端 Task + 固定本地 Judge。
+python -u -m agmem.evaluate_gpu --stage score --task-agents remote
+```
+
+`--datasets locomo`、`--checkpoints best` 可缩小运行范围；`--limit 2` 是独立 smoke 输出，不会混入完整测试结果。运行日志保存在 `runs/evaluation/format05_best_final/jobs/`；结果位于 `results/{best,final}/{locomo,split_longmemeval_s}/`，包含共享 `retrieval/`、独立的 `answers/{local,remote}/metrics.json` 与压缩逐题轨迹。全部已完成结果汇总到 `results/summary.json` 和 `results/summary.csv`。
+
+并行模式的日志分别为 `directories.log`（LongMemEval-S 目录）、`eval_locomo.log`、`eval_split_longmemeval_s.log`，两个 Qwen 服务日志为 `writer_vllm.log` 和 `qwen_vllm.log`。同一 job 下的 `schedule.json` 记录 GPU 分工，`progress.json` 记录各阶段状态；LoCoMo 完成后即可查看它的 `metrics.json` 与共享 `summary.csv`，无需等待 LongMemEval-S。
+
+### 目录引导的过程奖励 DAPO 训练
+
+新实验入口为 `configs/train_dapo_directory_process_v1.yaml`，对应 `method.png` 的奖励归因、动作归因和逐步优势，优化器及动态过滤继续使用 DAPO。只训练 Reader；Writer、静态目录、Task Agent 和 Judge 均固定。沿用 LoCoMo query 90:10 数据及已经构建的目录，每个目录项保留稳定 ID、`time_order.time`、`time_order.order` 和摘要。
+
+复用静态目录时，在已有三卡 allocation 的 GPU 节点、项目根目录执行以下命令；它不会申请 Slurm 资源。`--train-only` 将前两张可见 GPU 分配给 Reader，第三张分配给固定的 Task/Judge 及过程 likelihood 服务，不启动 Writer 或后台目录构建：
+
+```bash
+conda activate agmem
+export VLLM_USE_FLASHINFER_SAMPLER=0
+python -u -m agmem.four_gpu \
+  --train-only \
+  --train-config configs/train_dapo_directory_process_v1.yaml
+```
+
+可先追加 `--check-only` 核对已有训练/验证数据及目录（不使用 GPU）。三卡启动日志位于 `runs/three_gpu/<SLURM_JOB_ID>-<timestamp>/`。若确实需要四卡同时运行后台目录构建，使用原来的四卡 allocation 并去掉 `--train-only`。
+
+该配置从配置中的基础 Reader 模型启动独立实验，当前输出到 `runs/locomo_longmemeval/experiments/locomo_dapo_directory_process_v2/train/`，保留原 v1 运行记录。新的 Reader/Task 输入协议和过程评分协议不能直接续接旧的 outcome-only DAPO 或 v1 PRM run；新实验产生 checkpoint 后，只能用一致的配置与评分协议恢复。
+
+Reader 每次 READ 可以选择 1–2 个 ID，每题最多执行 8 次 READ；可以一次完成，也可以根据返回原文继续检索。`interaction_history_v5` 输入保存此前每次 Reader 原始输出、解析动作及完整工具响应，并提供去重后的已读证据；同时明确告诉 Reader，Task 可以看到已检索 session 的原文、时间和目录摘要，以及公开 observation/options。Task 使用 `history_answer_evidence_v2`：按 `History Chats: ... / Question: ...` 模板接收这些内容和 query，不包含未检索的目录、Reader 轨迹或 gold。提示词要求在保留答题必要信息的前提下简短作答（Keep the answer brief），只输出答案标签，不展开分析。
+
+Task 的生成上限仍为 2048 token。正常结束或命中上限后都使用现有输出，不因 `finish_reason=length` 重试或扩容：存在完整 `<answer>...</answer>` 时取第一组标签内正文；有 `<answer>` 但无后续 `</answer>` 时取开标签后全部文本；没有 `<answer>` 时答案为空字符串。Judge 只收到提取结果，包括空字符串。日志仍保留原始响应、finish reason、截断标记和答案标签完整性，Task 截断不计为 Reader format 违规或 Reader overlong masking。HTTP/传输失败、非文本响应及其他异常结束原因仍作为基础设施错误处理。旧 Task 协议保留原行为和缓存；新协议使用独立缓存身份。过程奖励的 gold likelihood 同样使用新 Task 输入，仍只评分 `<answer>` 后的 gold 正文 token。
+
+轨迹终局 reward 保持原设计：`2 × Judge − 1 − 0.01 × READ调用数 − 0.5 × format违规数`。正确答案的 outcome reward 为 +1，错误为 −1；调用成本对两者均生效。超出每次两个 ID 的位置、同批重复位置、无效 ID 和已成功读取的 ID，按每个违规 ID 位置累计，每个位置即使同时违反多项规则也只扣一次 0.5；无效 JSON/动作结构、空 READ、超过总调用预算等非 ID 协议违规仍按违规 decision 计一次。第 9 次 READ 请求不执行、不增加调用成本，但保留格式违规。过程奖励另用于计算每步优势，不加到这项终局 reward 中。
+
+新方案过滤为 `exclude_all_wrong`：剔除全错组，混合组和全对组均可进入，包括 format、cost 和终局 reward 完全相同的全对组。不再要求全对组有 format 差异；仍保留截断及空 token 防护，至少一条正确轨迹必须可以训练。该模式要求启用过程奖励，旧 ORM 配置及其过滤规则保持不变。通过过滤后才在参数更新前计算过程归因，被过滤的候选轨迹仍记录采样指标。
+
+奖励归因对每一步已经返回的证据前缀做冻结 Task 的标准答案 teacher forcing，使用 gold 正文 token 的平均 log-probability 增量；gold 不进入 Reader。动作归因固定实际采样的下一步 READ/STOP，用同一冻结 Reader 比较保留与删除本轮完整交互时该动作的平均 token log-probability。`mean_tau` 在单条轨迹中具有有效下一动作的 transition 上计算；没有有效下一动作时权重为 1。过程配置默认 `alpha: 1.0`、`gamma: 1.0`，动作权重裁剪至 `[0.5, 2.0]`。`normalization: group_standardize` 按图对同题全部轨迹的 READ 奖励一起标准化，STOP 的过程项为 0；可显式切换 `rms` 只缩放尺度、保留零点。逐步减均值会改变零即时收益动作的累计回报，比较两种设置时应使用独立实验目录。
+
+终局优势为 0 不再阻止过程训练：每步优势仍为终局优势加上加权的过程奖励累计回报。若过程奖励也完全相同，组内标准化后仍可能没有信号，这种组保留在批次中；只有整个批次全部可训练动作的最终优势都为 0 时，才跳过 optimizer step，继续采样，不增加训练 step 或 policy version，也不触发 Adam 动量更新。`skipped_updates.jsonl` 与 `zero_signal_batches/` 保存这类批次及其轨迹。续跑仍以 checkpoint 已提交的采样游标为准，之后未提交的零信号批次会归档并重新采样。采样指标 `accepted_all_correct`、`accepted_zero_terminal_advantage` 和更新指标 `process_zero_terminal_groups`、`process_zero_combined_advantage_groups` 分别记录终局及最终优势的情况，后两项按未被截断掩码排除的训练轨迹统计。
+
+每题采样 8 条 rollout，凑齐 8 个有效 group 后进行一次参数更新（最多 64 条 rollout，仍应用原有截断掩码；整批无信号时按上述规则跳过），然后用当前 Reader 重新采样；`target_groups` 与 `mini_batch_groups` 均为 8。学习率继承为 `1e-6`，每 4 个实际更新 step 验证一次，验证完成后保存 checkpoint；`checkpoint_every: 0` 关闭额外的周期保存，正常训练结束仍保存最终 checkpoint。数据 epoch 为 3。训练轨迹中的 `process_attribution` 保存每步证据增量、动作支持度、权重、过程奖励和优势；训练指标记录相应统计，日志中的 `process_attribution_started/progress` 表示更新前正在计算过程评分。新 Task 协议已做离线单元与集成测试，尚未启动真实 GPU 训练。
+
+### 三卡重建 LoCoMo / LongMemEval 父子目录
+
+`scripts/build_longmemeval_qwen.sh` 现按 [父子目录设计](doc/build_directory.md) 构建 LoCoMo、LongMemEval-S/M 的 train、validation、test。每张 80GB GPU 部署一份 Qwen3.5-27B（TP=1），默认共 48 个并发请求，每个服务最多 16 个活动序列、prefill 分块 4096 token。三份权重依次初始化，之后同时推理。启动前检查可用显存，不会自动终止已有训练或模型服务。
+
+先在原训练终端退出训练并等待显存释放，再在同一个三卡作业中执行：
+
+```bash
+cd /share/home/wtma/AG-mem
+conda activate agmem
+bash scripts/build_longmemeval_qwen.sh
+```
+
+登录节点可只检查输入与构建配置，不申请 GPU、不发请求、不写构建数据：
+
+```bash
+bash scripts/build_longmemeval_qwen.sh --dry-run
+```
+
+如需另外申请三张 A100 80GB，提供独立的两天 Slurm 脚本，手动提交：
+
+```bash
+sbatch scripts/build_longmemeval_qwen_3gpu.sbatch
+```
+
+也支持复用已经部署的三个相同 Qwen 服务；此模式不启动或停止这些服务：
+
+```bash
+bash scripts/build_longmemeval_qwen.sh --base-urls \
+  http://127.0.0.1:8000/v1 http://127.0.0.1:8001/v1 http://127.0.0.1:8002/v1
+```
+
+默认配置为 `configs/build_parent_child_qwen.yaml`，新结果写入 `runs/parent_child_directories/qwen27b_child300_v1/`。子摘要预算已从 160 调整为 300 token，因此使用独立输出路径；此前 `qwen27b_v1/` 保留。运行中的进程使用启动时加载的预算，需重启才会应用新配置。旧单层摘要无法充当新父子目录，因此从现有 session 正文重新生成；原 GPT/Qwen 目录保留。LoCoMo 按 conversation 共享 bank，LongMemEval 按题独立 bank。输入相同、构建身份一致的 session 可以跨 bank 复用新生成且已校验的结果，重新绑定本 bank 的 ID；query、gold、has_answer 和原始 answer_ ID 不进入 Writer。
+
+Writer 只看当前 session，不再拼接前 3 个 session。对话中每条完整消息为一个 Block，模型按连续事件、话题、需求或子目标划分子项，输出父项 `title/content` 及每个子项的 `end_block/title/content/entities`。程序生成 ID、起止范围、时间、原文指针与版本。边界必须连续且完整覆盖全部 Block；换说话人或单纯换实体不是切分依据。完整提示词与 Schema 位于 `agmem/hierarchical/resources/`，主要为 `writer_system.txt` 和 `writer_user.txt`。
+
+上下文上限 65,536 token，使用本地真实 tokenizer 和 chat template 计数；标题上限 24、父概述 200、子摘要 300 token，实体最多 12 个。输出预算从 4,096 增至最多 16,384 token；`length` 截断的 JSON 不被接受。超长 session 按完整 Block 分窗，最多带前 2 个 Block 作只读上下文，最后汇总父概述。语义修复最多 2 次；后备固定边界或无事实占位会明确标为 `fallback`，不会冒充正常语义摘要。单条不可分 Block 超出输入预算或请求基础设施故障会记录失败。
+
+默认顺序为 LoCoMo → LongMemEval-S → LongMemEval-M，各自处理 train、validation、test。可加 `--datasets locomo`，或 `--datasets split_longmemeval_s --splits test` 选择子集。`--workers 24 --max-num-seqs 8` 可降低并发。相同命令可续建：成功 session 跳过，失败及默认的 `fallback` 重试；并发和服务端口可更改。更改输入文件、模型身份或提示词需使用新输出路径。
+
+每个 session 完成即提交到 `build_journal.sqlite3`；正常结束或可捕获异常退出时导出 `records.jsonl`、`blocks.jsonl`、`directories.jsonl`、`source_map.jsonl`、`bank_manifest.jsonl`、`writer_traces.jsonl`、`build_report.json` 和 `retry_failed.json`。构建过程中以日志进度和 journal 为准；强制终止后再次运行会恢复并重新导出。报告分别记录 `complete/fallback/empty/failed/pending`；存在失败时整体非零退出，但已完成结果保留。
+
+本地当前只有处理后的 LoCoMo Parquet，没有官方原始 JSON；适配器保留 Parquet 中现有正文，并记录兼容模式警告，不猜测还原先前预处理。若提供官方 JSON，可将该数据源改为 `format: locomo_json` 并配置 `path`，另用新输出路径。
+
+`agmem/hierarchical/reader.py` 提供独立的展开和回读接口：初始只显示父目录，READ 父 ID 展开子项，下一轮才允许 READ 已展示的子 ID 回读对应目录项与原文；父目录始终可见，已读证据保留。展开列表的保留策略需调用方显式选择 `retention="cumulative"` 或 `"latest"`。这些接口尚未替换当前训练/评估的旧 Reader 环境，新数据也不会自动写入现有训练配置。
+
+若确需继续旧单层目录的补建，可显式执行 `bash scripts/build_longmemeval_qwen.sh --legacy-flat --config configs/build_longmemeval_qwen.yaml`；该配置与新父子目录分开保存。
+
+启动器会打印日志目录 `runs/longmemeval_qwen_build/jobs/<jobid>-<timestamp>/`。`directories.log` 记录构建进度，`writer_0.log`、`writer_1.log`、`writer_2.log` 分别记录三卡服务，`cuda_preflight.log` 记录显存检查。退出时只清理本次启动器创建的进程组。
+
+## 相邻语义聚类目录构建
+
+新入口仅处理 LoCoMo 和 LongMemEval-S 的 train、validation、test，配置为
+`configs/build_adjacent_qwen_locomo_lmes.yaml`。Qwen3-Embedding-4B 先将同一 session
+中的相邻 Block 合并为连续语义段，灰区由 Qwen3.5-27B 判断；随后为固定范围生成子项，
+最后依据子项和 session 原文生成父目录条目。原文不重排，范围完整覆盖，无强制“两条消息一个子项”。
+每个 bank 的所有 session 条目共同组成父目录；每个 session 有自己的子目录。
+
+默认直接读取本地 `../model/qwen3-embedding-4b/`，使用原生 2560 维向量。
+启动前检查模型配置、pooling 维度与客户端维度一致，服务就绪后再用真实 embedding 请求检查输出。
+Writer 继续使用 `/share/home/wtma/model/qwen3.5-27b`。
+若在其他机器上缺少 embedding 权重，可在能访问 Hugging Face 的节点下载：
+
+```bash
+conda activate agmem
+bash scripts/download_directory_embedding.sh
+```
+
+下载脚本默认写入 `../model/qwen3-embedding-4b/`，保存实际模型 revision 以支持复现。
+模型已存在其他路径时，启动命令可加 `--embedding-model-path /path/to/Qwen3-Embedding-4B`。
+
+在已有三卡 allocation 的 GPU 终端运行。如果旧构建仍占用这三张卡，先在原终端停止它并等待显存释放；
+启动器不会结束其他进程，也不会提交 Slurm 作业：
+
+```bash
+cd /share/home/wtma/AG-mem
+conda activate agmem
+bash scripts/build_adjacent_directories_qwen.sh
+```
+
+| 可见 GPU | 服务 | 默认并发 |
+|---|---|---|
+| 0 | Qwen3-Embedding-4B | 4 个批请求，每批最多 32 条、16384 token |
+| 1 | Qwen3.5-27B Writer | 最多 64 个请求 |
+| 2 | Qwen3.5-27B Writer | 最多 64 个请求 |
+
+Writer 总并发 128，所有数据源共享两个副本；单个数据集也可以同时利用两个 Writer。
+服务依次启动以降低加载时的 CPU 内存峰值，启动完成后并行处理。
+Writer 上下文为 65536 token，标题 / 父摘要 / 子摘要预算为 24 / 200 / 300 token。
+聚类阈值为待校准初值：高阈值 0.78、低阈值 0.55、内部一致性下限 0.40。
+每段原文最多 4096 token；超过预算的单个完整 Block 保留并标记。
+灰区每 session 最多判断 32 次，超过判断预算保留边界，并单独计数；服务失败会明确标为 fallback。
+
+可先检查六份输入文件及参数，再用独立输出目录做小规模构建；前一条命令无需 GPU，缺少 encoder 权重时会明确报告未就绪：
+
+```bash
+bash scripts/build_adjacent_directories_qwen.sh --dry-run
+bash scripts/build_adjacent_directories_qwen.sh \
+  --limit-sessions 20 --output-root runs/parent_child_directories/adjacent_smoke_v1
+```
+
+默认正式输出为 `runs/parent_child_directories/qwen27b_adjacent_qwen4b_v1/`。
+相同命令可以续跑，复用已提交成功目录、embedding 缓存及成功边界决策，默认重试失败与 fallback。
+旧目录不会被覆盖；新构建不读取 LongMemEval-M，也不会自动切换现有训练/评估配置。
+更改模型、提示词、聚类参数或输入内容需另设输出路径；并发可以在续跑时调整。
+日志位于 `runs/adjacent_directory_build/jobs/<jobid>-<timestamp>/`，包括 `directories.log`、
+`embedding.log`、`writer_1.log`、`writer_2.log` 和 `cuda_preflight.log`。
+结果与统计仍使用 `directories.jsonl`、`build_report.json`、`writer_traces.jsonl` 等既有文件格式，
+另外保存 `embedding_cache.sqlite3`；构建期间进度以日志和 `build_journal.sqlite3` 为准。
+
+需要新申请资源时，可自行提交三张 A100 80GB、两天的脚本：
+
+```bash
+sbatch scripts/build_adjacent_directories_qwen_3gpu.sbatch
+```
+
+## LongMemEval 当前 8:1:1 数据与三卡构建
+
+后续 LongMemEval-S/M 的训练、验证和测试统一使用
+`data/processed/longmemeval_811_seed42_20261111/`，两版均为 400/50/50 题。
+原 train 340 题、validation 10 题保留；从原 test 调出 60/40 题，新的 test 50 题
+是原 test 150 题的子集。同题在 S/M 中保持同一划分。`row_mapping.jsonl` 保存旧、新行号、
+文件 SHA 和 bank ID，`manifest.json` 保存分层抽样与全列内容校验结果。
+旧数据、运行配置及已冻结 prepared 仅用于复现历史实验，不应作为后续 LongMemEval 的数据入口。
+
+在已分配三张 80GB GPU 的终端依次运行下列两套脚本；每套启动器结束时会释放自己启动的服务。
+
+```bash
+conda activate agmem
+# 1. 新 S/M 测试集：构建旧 ORM 单层目录，随后自动评估 checkpoint20/32。
+bash scripts/build_longmemeval_811_flat_qwen.sh
+# 2. 新 S 的 train/validation/test：保留已有父子目录，缺失部分按新话题/事件规则构建。
+bash scripts/build_longmemeval_811_hierarchical_qwen.sh
+```
+
+第一套使用三份 Qwen3.5-27B，Writer 总并发 192、每卡最多 64。
+Writer prompt 与旧版本一致：当前 session 是摘要目标，前 3 个原始 session 作背景，摘要上限 300 tokens。
+已有 GPT/Qwen 摘要保留原内容与来源，缺失项才调用本地 Qwen；输出为
+`runs/locomo_longmemeval/prepared_longmemeval_811_flat/test/<dataset>/`。
+默认只处理 S/M 测试集；`--splits train validation test` 可显式扩展范围。
+目录构建成功并释放三份 Writer 后，同一脚本自动切换为前两张卡运行 Reader、
+第三张卡运行 Qwen3.5-27B Task/Judge，对 checkpoint20 和 checkpoint32 各评估 S/M 的 50 道测试题。
+若只需要目录构建，加 `--build-only`。旧版脚本已经启动的进程不会自动接入新增评估阶段；
+等待它结束并释放 GPU 后执行：
+
+```bash
+bash scripts/build_longmemeval_811_flat_qwen.sh --eval-only
+```
+
+评估配置为 `configs/eval_longmemeval_811_orm_checkpoints.yaml`。
+Reader 使用保存的旧 ORM 训练配置与 prompt（逐项校验输入协议），最多 8 次 READ、每次 1 个 ID；
+目录必须来自本节新 8:1:1 测试数据且全部完成，评估不会另建目录或混入父子目录。
+Task 使用此前统一的 `history_answer_v1`，输入为问题、公开 observation 和检索原文/时间，
+输出完整 `<answer>...</answer>`，上限 2048 tokens；本地截断或缺失标签作为请求失败，不能当成答错评分。
+Judge 使用冻结的 `format05_training_judge.json` 中与
+[LongMemEval 官方评估脚本](https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py)
+一致的题型 prompt，`_abs` 题优先使用 abstention 模板。本地严格解析 yes/no，不将格式异常计为错误答案。
+本地结果存放于 `runs/evaluation/longmemeval_811_orm/results/summary.csv`；
+`best` 对应 step20，`final` 对应 step32，逐题轨迹、按题型指标位于各 checkpoint/dataset 下。
+采样和本地回答不访问外网。
+
+每组结果自动导出 `offline/requests.json.gz`，保存相同 Reader 证据与 Task 消息。
+之后在能联网且能访问项目结果的 CPU/login 节点设置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`，运行：
+
+```bash
+bash scripts/eval_longmemeval_811_gpt.sh
+```
+
+该脚本用 GPT-5-mini 重新回答并按相同 LongMemEval prompt 判分，不重新运行 Reader。
+GPT 结果在 `runs/evaluation/longmemeval_811_orm/gpt/judge_results/summary.csv`，
+不会覆盖 Qwen 结果。重跑默认续接已完成请求；设置 `AGMEM_EVAL_OUTPUT_ROOT` 可另开一次远端实验。
+
+第二套先在 CPU 上验证新旧原始行和目录来源，再向独立输出库重绑定可复用目录的
+bank/source/snapshot/version，保留摘要、实体、原文和子项边界。
+已存在的 complete/empty/fallback 目录原样保留，并记录旧版构建身份；fallback 标记也保留，
+不将它改记为正常完成。缺失、pending、failed 的 session 使用 topic/event v2 规则新建。
+这是明确记录来源的混合版本实验，不是把全库目录升级成 v2。
+不复制旧分段决策或 Writer 缓存，也不复制 10GB 的 embedding 缓存，不覆盖源库和目标中已提交的目录。
+然后部署 GPU0 Qwen3-Embedding-4B、GPU1/2 Qwen3.5-27B，总 Writer 并发 128、每卡最多 64；
+新建部分的父/子摘要上限为 400/300 tokens，高/低阈值为 0.72/0.50。
+复用目录仍记录其原来的 0.78/0.55；旧规则与新规则的阈值分别写入逐 session 来源清单。
+该增量配置 `retry_fallback: false`，新产生的 fallback 同样保留标记，后续需要主动定向修复。
+服务单次超时 1200 秒，最多重试 1 次，以容纳慢速的长输出。
+配置为 `configs/build_adjacent_qwen_longmemeval_811_incremental.yaml`，
+输出为 `runs/parent_child_directories/qwen27b_adjacent_qwen4b_811_incremental_v2/`；
+`reuse_report.json`、`reuse_provenance.jsonl` 记录导入结果，
+`directory_rule_provenance.jsonl` 区分每个 session 的旧版保留目录、新版生成目录及待构建状态。
+构建完成后导出最终 JSONL。
+当前第二套默认仅构建 S；M 的相邻语义父子目录不属于本次默认范围。
+
+两套脚本均支持 `--dry-run`（只读、不启动服务、不创建结果库），以及原样重跑续建。
+父子目录导入前必须让旧构建释放 `.build.lock`；不要删除锁文件或把旧输出库当成新数据的输出库。
+
+### 按具体话题或事件判断边界（v2）
+
+新的边界复核 prompt 位于
+`agmem/hierarchical/resources/adjacent/topic_event_v2/boundary.txt`。
+同一事件中的提问、澄清、改期、等待、确认和简短收尾保持连贯；独立事件仍分开，
+不再把对话行为或计划阶段的变化本身当作切分依据。高/低阈值为 0.72/0.50。
+
+v2 使用独立的构建版本和输出库；旧 v1 的续跑及 fallback 修复仍保留原规则。
+如需复现原先全部按 v1 规则补建的 8:1:1 流程，使用
+`scripts/build_longmemeval_811_hierarchical_v1_qwen.sh` 和原配置。
+旧目录不会因 prompt 更新自动重新分段，也不能将其边界缓存作为 v2 的结果导入。
+上一节增量脚本显式保存旧目录来源，只对没有目录的 session 使用新规则。
+新入口默认处理 LoCoMo 和新 8:1:1 LongMemEval-S 的 train/validation/test，父/子摘要预算 400/300，
+GPU0 部署 Qwen3-Embedding-4B，GPU1/2 部署 Qwen3.5-27B，每个 Writer 最多 64 请求，总并发 128。
+
+```bash
+# 只检查输入和配置，不启动推理服务。
+bash scripts/build_topic_event_directories_qwen.sh --dry-run
+# 如需构建，可先在独立小样本输出中验证新规则。
+bash scripts/build_topic_event_directories_qwen.sh --datasets locomo \
+  --limit-sessions 20 --output-root runs/parent_child_directories/topic_event_v2_smoke
+```
+
+正式配置为 `configs/build_adjacent_qwen_topic_event_v2.yaml`，输出库为
+`runs/parent_child_directories/qwen27b_adjacent_qwen4b_topic_event_v2/`。
+相同配置和输出路径支持续跑；更改阈值或 prompt 后应使用新输出路径。

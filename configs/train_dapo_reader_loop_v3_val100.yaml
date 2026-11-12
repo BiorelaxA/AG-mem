@@ -1,0 +1,9 @@
+extends: train_dapo_reader_loop_v3_val1pct.yaml
+# Preserve existing validation questions; grow LoCoMo to 100 queries.
+# LongMemEval-S reaches ceil(10% of 336 current training queries) = 34.
+# Newly held-out queries include both single- and multi-session support.
+data:
+  input_root: data/processed/query_dedup_val100_lmes34_seed42_20261031
+  prepared_root: runs/locomo_longmemeval/prepared_val100_lmes34_seed42_20261031
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_max1_no_cost_reader_loop_v3_val100_lmes34/train

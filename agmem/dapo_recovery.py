@@ -78,12 +78,24 @@ def reconcile_run(run_dir, state):
     """
     root = Path(run_dir)
     step = _integer(state["step"], "step")
-    candidate_index = _integer(state["dapo_state"]["sampler"].get("candidate_index", 0), "candidate_index")
+    dapo_state = state["dapo_state"]
+    candidate_index = _integer(dapo_state["sampler"].get("candidate_index", 0), "candidate_index")
+    skip_index = _integer(dapo_state.get("counters", {}).get("skipped_zero_signal_batches", 0), "skip_index")
+    zero_signal_boundary = _integer(dapo_state["sampler"].get("batch_index", 0), "batch_index")
+    active = dapo_state.get("active")
+    if active and "batch_id" in active:
+        # Sampling advances batch_index before the pending batch is consumed.
+        # Any skip artifact from that still-active batch is uncommitted too.
+        batch_id = active["batch_id"]
+        if not isinstance(batch_id, str) or not batch_id.startswith("batch-") or not batch_id[6:].isdigit():
+            raise ValueError("Recovery requires an indexed active DAPO batch_id")
+        zero_signal_boundary = min(zero_signal_boundary, int(batch_id[6:]))
     rewrites = []
     for filename, field, limit, inclusive in (
         ("train_metrics.jsonl", "step", step, True),
         ("sampling_metrics.jsonl", "candidate_index", candidate_index, True),
         ("candidate_metrics.jsonl", "candidate_id", candidate_index, False),
+        ("skipped_updates.jsonl", "skip_index", skip_index, True),
     ):
         path = root / filename
         if path.is_file():
@@ -96,6 +108,7 @@ def reconcile_run(run_dir, state):
         ("groups", "group-", ".json.gz", step, False),
         ("rollouts", "group-", ".json", step, False),
         ("candidate_rollouts", "candidate-", ".json", candidate_index, False),
+        ("zero_signal_batches", "batch-", "", zero_signal_boundary, False),
         ("validation", "step-", "", step, True),
         ("", "checkpoint-", "", step, True),
     ):

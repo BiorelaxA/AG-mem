@@ -49,6 +49,63 @@ def populate(root):
 
 
 class DAPORecoveryTests(unittest.TestCase):
+    def test_zero_signal_audits_follow_committed_skip_count_and_pending_batch_boundary(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                state = populate(root)
+                state["dapo_state"]["counters"] = {"skipped_zero_signal_batches": 2}
+                state["dapo_state"]["sampler"]["batch_index"] = 3 if pending else 2
+                state["dapo_state"]["active"] = {"batch_id": "batch-00000002", "consumed_groups": 0} if pending else None
+                # All records can share an optimizer step (and even a sampling
+                # cursor after a buffered batch), so only skip_index commits it.
+                rows = [{"skip_index": i + 1, "step": 2, "candidate_index": 6,
+                         "batch_id": f"batch-{i:08d}"} for i in range(4)]
+                jsonl(root / "skipped_updates.jsonl", rows)
+                original_log = (root / "skipped_updates.jsonl").read_bytes()
+                for i in range(4):
+                    trace = root / "zero_signal_batches" / f"batch-{i:08d}"
+                    (trace / "groups").mkdir(parents=True)
+                    (trace / "groups/group-00000002.json.gz").write_bytes(f"full-audit-{i}".encode())
+                    (trace / "rollouts").mkdir()
+                    (trace / "rollouts/group-00000002.json").write_text(f"readable-audit-{i}")
+                before = deepcopy(state)
+                result = reconcile_run(root, state)
+                self.assertEqual(state, before)
+                archive = Path(result["archive"])
+                kept = [json.loads(line) for line in (root / "skipped_updates.jsonl").read_text().splitlines()]
+                self.assertEqual(kept, rows[:2])
+                self.assertEqual((archive / "skipped_updates.jsonl").read_bytes(), original_log)
+                for i in range(4):
+                    relative = Path("zero_signal_batches") / f"batch-{i:08d}"
+                    destination = root if i < 2 else archive
+                    self.assertEqual((destination / relative / "groups/group-00000002.json.gz").read_bytes(),
+                                     f"full-audit-{i}".encode())
+                    self.assertEqual((destination / relative / "rollouts/group-00000002.json").read_text(),
+                                     f"readable-audit-{i}")
+                    if i >= 2:
+                        self.assertFalse((root / relative).exists())
+                self.assertEqual((root / "checkpoint-00000002/trainer.pt").read_bytes(), b"original-torch-state-2")
+                again = reconcile_run(root, state)
+                self.assertIsNone(again["archive"])
+                self.assertEqual(again["archived_artifacts"], [])
+                self.assertEqual(len(list((root / "resume_orphans").iterdir())), 1)
+
+    def test_legacy_checkpoint_commits_no_zero_signal_audits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = populate(root)  # No skip counter or sampler batch_index.
+            jsonl(root / "skipped_updates.jsonl", [{"skip_index": 1, "step": 2, "candidate_index": 6}])
+            trace = root / "zero_signal_batches/batch-00000000/groups"
+            trace.mkdir(parents=True)
+            (trace / "group-00000002.json.gz").write_bytes(b"uncommitted audit")
+            result = reconcile_run(root, state)
+            self.assertEqual((root / "skipped_updates.jsonl").read_text(), "")
+            self.assertFalse(trace.parent.exists())
+            self.assertEqual((Path(result["archive"]) / "zero_signal_batches/batch-00000000/groups/group-00000002.json.gz").read_bytes(),
+                             b"uncommitted audit")
+            self.assertIsNone(reconcile_run(root, state)["archive"])
+
     def test_archives_future_artifacts_but_retains_committed_sampling_buffer(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

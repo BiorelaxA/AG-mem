@@ -1,0 +1,22 @@
+# Reuse the saved Qwen Writer prompt/schema/window/300-token limit. Only the
+# Writer backend changes. The Qwen tokenizer is loaded on CPU, not its weights.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+input_root: data/processed/query_dedup_val10_seed42_20261018
+prepared_root: runs/evaluation/longmemeval_gpt5mini/prepared_test
+datasets: [split_longmemeval_s, split_longmemeval_m]
+writer_workers: 8
+writer_service:
+  request_profile: openai_chat
+  model: gpt-5-mini
+  model_revision: gpt-5-mini
+  base_url: https://api.openai.com/v1
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  send_seed: false
+  temperature: null
+  max_tokens_parameter: max_completion_tokens
+  # Includes reasoning tokens; this is separate from the 300-token summary cap.
+  max_output_tokens: 2048
+  max_completion_tokens: 16384
+  timeout_seconds: 120
+  retries: 6

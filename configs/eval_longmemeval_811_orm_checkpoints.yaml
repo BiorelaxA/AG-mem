@@ -1,0 +1,45 @@
+# Old flat-directory ORM checkpoints, new 400/50/50 LongMemEval split.
+# Reader contract comes verbatim from the saved run, including one ID per READ.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+checkpoints:
+  best: checkpoint-00000020
+  final: checkpoint-00000032
+checkpoint_steps:
+  best: 20
+  final: 32
+datasets: [split_longmemeval_s, split_longmemeval_m]
+input_root: data/processed/longmemeval_811_seed42_20261111
+prepared_root: runs/locomo_longmemeval/prepared_longmemeval_811_flat/test
+# Require complete, provenance-checked flat stores; never build new directories
+# inside evaluation or substitute a hierarchical store.
+required_prepared_sources:
+  split_longmemeval_s: runs/locomo_longmemeval/prepared_longmemeval_811_flat/test/split_longmemeval_s
+  split_longmemeval_m: runs/locomo_longmemeval/prepared_longmemeval_811_flat/test/split_longmemeval_m
+output_root: runs/evaluation/longmemeval_811_orm/results
+local_base_url: http://127.0.0.1:8000/v1
+# Explicitly retain the user's common Task prompt for local and remote answers.
+task_prompt_version: history_answer_v1
+task_max_output_tokens: 2048
+# The frozen snapshot's LongMemEval templates match the official category and
+# abstention prompts. It also verifies the original run's template hashes.
+judge_template_file: configs/protocols/format05_training_judge.json
+task_agents: [local]
+export_remote_inputs: true
+parallel_directory_build: false
+evaluation_execution:
+  reader_query_concurrency: 4
+  reader_batch_size: 4
+  reader_batch_max_tokens: 16384
+  local_scoring_workers: 2
+  remote_scoring_workers: 2
+remote_task:
+  model: gpt-5-mini
+  model_revision: gpt-5-mini
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  request_profile: openai_chat
+  send_seed: false
+  temperature: null
+  max_tokens_parameter: max_completion_tokens
+  timeout_seconds: 120
+  retries: 3

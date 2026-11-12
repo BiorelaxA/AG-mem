@@ -117,6 +117,17 @@ def prepare(config, limit=None, verify=True, sources=None):
 
 
 def open_prepared(config):
+    if config["data"].get("directory_protocol") == "hierarchical_v1":
+        from .hierarchical_training_store import HierarchicalTrainingStore
+        store = HierarchicalTrainingStore(config["data"]["prepared_root"],
+                    memory_cache_size=max(2, execution_settings(config)["sampling_group_concurrency"]))
+        identity = store.get_metadata("prepare_identity", {})
+        if (not store.get_metadata("prepare_complete")
+                or store.get_metadata("directory_protocol") != "hierarchical_v1"
+                or any(identity.get(key) != config["data"][key] for key in ("sources", "splits"))):
+            store.close()
+            raise ValueError("Frozen hierarchical preparation differs from the training configuration")
+        return store
     if config["data"].get("layout", "combined") == "by_source":
         stores = {}
         try:
@@ -127,7 +138,8 @@ def open_prepared(config):
             for store in stores.values():
                 store.close()
             raise
-    store = Store(config["data"]["prepared_root"])
+    store = Store(config["data"]["prepared_root"],
+                  memory_cache_size=max(2, execution_settings(config)["sampling_group_concurrency"]))
     if store.get_metadata("prepare_complete") is not True:
         store.close()
         raise ValueError("Run prepare successfully before using this store")
@@ -147,6 +159,8 @@ def directory_version(store):
 
 
 def build_directories(config, limit=None, sources=None):
+    if config["data"].get("directory_protocol") == "hierarchical_v1":
+        raise ValueError("Freeze existing hierarchical directories with agmem.prepare_hierarchical_training")
     if config["data"].get("frozen_directory_version"):
         raise ValueError("Frozen directories are read-only training inputs; build new directories with a separate configuration")
     if config["data"].get("layout", "combined") == "by_source":
@@ -158,13 +172,15 @@ def build_directories(config, limit=None, sources=None):
         return versions
     if sources is not None:
         raise ValueError("--sources requires data.layout=by_source")
-    from .policy import load_tokenizer, model_fingerprint
-    from .services import ChatService, DirectoryBuilder
+    from .policy import load_tokenizer
+    from .remote_writer import create_writer_service
+    from .services import DirectoryBuilder
     store = open_prepared(config)
-    service_config = dict(config["service"])
-    service_config["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
     try:
-        builder = DirectoryBuilder(store, ChatService(service_config, store, "writer"), config["writer"], load_tokenizer(config["models"]["task_path"]))
+        service = create_writer_service(config, store)
+        # Keep the summary length measured by the same local Task tokenizer,
+        # regardless of whether the Writer itself is local or remote.
+        builder = DirectoryBuilder(store, service, config["writer"], load_tokenizer(config["models"]["task_path"]))
         workers = execution_settings(config)["writer_workers"]
         announce("directory_execution", writer_workers=workers, version=builder.version)
         pending_total = 0
@@ -177,7 +193,7 @@ def build_directories(config, limit=None, sources=None):
             announce("directory_built", index=i, memory_id=memory_id, sessions=len(entries),
                      empty_pending=pending, version=builder.version)
         store.set_metadata("directory_version", builder.version)
-        store.set_metadata("directory_service_identity", {k: v for k, v in service_config.items() if k != "request_base_url"})
+        store.set_metadata("directory_service_identity", service.identity)
         store.set_metadata("directory_empty_pending", pending_total)
         announce("directories_finished", empty_pending=pending_total, version=builder.version)
         return builder.version
@@ -187,8 +203,16 @@ def build_directories(config, limit=None, sources=None):
 
 def validate_directory_version(config, store):
     """Use the same Writer provenance contract before and during model setup."""
+    if config["data"].get("directory_protocol") == "hierarchical_v1":
+        if store.get_metadata("directory_protocol") != "hierarchical_v1":
+            raise ValueError("Expected a frozen hierarchical directory store")
+        version = directory_version(store)
+        frozen = config["data"].get("frozen_directory_version")
+        if frozen is not None and frozen != version:
+            raise ValueError("Frozen hierarchical directory version differs from configuration")
+        return version
     from types import SimpleNamespace
-    from .policy import model_fingerprint
+    from .remote_writer import writer_identity
     from .services import DirectoryBuilder
     frozen = config.get("data", {}).get("frozen_directory_version")
     if frozen is not None and (not isinstance(frozen, str) or len(frozen) != 64
@@ -197,8 +221,7 @@ def validate_directory_version(config, store):
     if frozen:
         expected = frozen
     else:
-        identity = {key: config["service"][key] for key in ("base_url", "model")}
-        identity["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
+        identity = writer_identity(config)
         expected = DirectoryBuilder(store, SimpleNamespace(identity=identity), config["writer"], None).version
     if directory_version(store) != expected:
         raise ValueError("Selected directory versions differ from current Writer; build selected datasets first")
@@ -212,7 +235,11 @@ def validate_directory_version(config, store):
             recorded = child.get_metadata("directory_service_identity", {})
             if not all(recorded.get(k) for k in ("base_url", "model", "model_revision")):
                 raise ValueError("Frozen directory lacks recorded Writer identity")
-            identity = {k: recorded[k] for k in ("base_url", "model", "model_revision")}
+            # Legacy local manifests also stored transport settings that were
+            # never part of their hash. Remote request settings are explicitly
+            # hashed and must survive freezing without dropping provenance.
+            identity = (dict(recorded) if recorded.get("request_profile") == "openai_chat"
+                        else {k: recorded[k] for k in ("base_url", "model", "model_revision")})
             original = DirectoryBuilder(child, SimpleNamespace(identity=identity), config["writer"], None).version
             if original != frozen:
                 raise ValueError("Frozen directory does not match recorded Writer identity/current prompt/configuration")
@@ -222,6 +249,10 @@ def validate_directory_version(config, store):
 def validate_directories(config, store, splits):
     """Fail before loading training weights if a selected history is not ready."""
     expected = validate_directory_version(config, store)
+    if config["data"].get("directory_protocol") == "hierarchical_v1":
+        if store.validate_directories(splits) != expected:
+            raise ValueError("Hierarchical directory snapshot changed")
+        return
     frozen = config["data"].get("frozen_directory_version")
     children = store.stores.values() if isinstance(store, DatasetStores) else [store]
     for child in children:
@@ -321,15 +352,27 @@ def make_environment(config, store, policy):
             tokens = chat_token_ids(task_tokenizer, task_input)
             if len(tokens) + config["task_agent"]["max_output_tokens"] > limit:
                 raise CapacityError("Task-agent context would overflow")
-    return MemoryEnvironment(store, expected_version, config["retrieval"]["max_ids_per_call"], config["retrieval"]["max_read_calls"], capacity, id_protocol=config["retrieval"].get("id_protocol", "strict_v1"))
+    if config["data"].get("directory_protocol") == "hierarchical_v1":
+        from .hierarchical_env import HierarchicalMemoryEnvironment
+        return HierarchicalMemoryEnvironment(store, expected_version,
+                    max_ids=config["retrieval"]["max_ids_per_call"],
+                    max_calls=config["retrieval"]["max_read_calls"], capacity=capacity,
+                    count_tokens=lambda text: len(task_tokenizer.encode(text, add_special_tokens=False)),
+                    max_open_directories=config["retrieval"].get("max_open_directories", 2),
+                    prompt_version=config["reader"]["prompt_version"],
+                    task_prompt_version=config["task_agent"]["prompt_version"])
+    return MemoryEnvironment(store, expected_version, config["retrieval"]["max_ids_per_call"],
+                             config["retrieval"]["max_read_calls"], capacity,
+                             id_protocol=config["retrieval"].get("id_protocol", "strict_v1"),
+                             prompt_version=config.get("reader", {}).get("prompt_version", "legacy_v1"),
+                             task_prompt_version=config.get("task_agent", {}).get("prompt_version", "legacy_v1"))
 
 
 def make_task_agent(config, store):
-    from .policy import model_fingerprint
-    from .services import ChatService, TaskAgent
-    service_config = dict(config["service"])
-    service_config["model_revision"] = model_fingerprint(config["models"]["task_path"])["fingerprint"]
-    return TaskAgent(ChatService(service_config, store, "task_agent"), config["task_agent"]["max_output_tokens"])
+    from .services import ChatService, TaskAgent, resolve_task_service
+    service_config = resolve_task_service(config)
+    return TaskAgent(ChatService(service_config, store, "task_agent"), config["task_agent"]["max_output_tokens"],
+                     prompt_version=config["task_agent"].get("prompt_version", "legacy_v1"))
 
 
 def make_reward_scorer(config, store):
@@ -345,9 +388,14 @@ def make_reward_scorer(config, store):
         likelihood_config = dict(config["reward"].get("likelihood", {"mode": "off"}))
         likelihood_config.setdefault("max_context_tokens", config["task_agent"].get("max_context_tokens", 65536))
         likelihood = ReferenceLikelihoodScorer(service, store, likelihood_config,
-                            tokenizer_factory=lambda: load_tokenizer(config["models"]["task_path"]))
+                            tokenizer_factory=lambda: load_tokenizer(config["models"]["task_path"]),
+                            prompt_version=config["task_agent"].get("prompt_version", "legacy_v1"))
+    from .prompts import task_input_contract
+    contract = task_input_contract(config.get("task_agent", {}).get("prompt_version", "legacy_v1"))
+    task_output_policy = (contract["completion_policy"]
+                          if contract.get("answer_parser") == "answer_tag_partial_v1" else None)
     return RewardScorer(config["reward"], judge=judge, likelihood=likelihood,
-                        max_ids=config["retrieval"]["max_ids_per_call"])
+                        max_ids=config["retrieval"]["max_ids_per_call"], task_output_policy=task_output_policy)
 
 
 def scored_rollout(config, env, policy, agent, example, seed, scorer=None):
@@ -411,6 +459,7 @@ def metrics(rows):
                 "read_cost": sum(row.read_cost for row in values) / n,
                 "raw_read_cost": sum(row.raw_read_cost for row in values) / n,
                 "format_reward": sum(row.format_reward for row in values) / n,
+                "format_violation_count": sum(row.format_violation_count for row in values) / n,
                 "format_failure_rate": sum(row.format_failure for row in values) / n,
                 "task_truncation_rate": sum(bool(row.task_completion.get("truncated")) for row in values) / n,
                 "p95_read_calls": calls[min(n - 1, int(0.95 * n))],
@@ -425,18 +474,25 @@ def metrics(rows):
     for row in rows:
         grouped[row.sample_id.split("/")[0]].append(row)
     by_source = {source: summarize(values) for source, values in grouped.items()}
-    return {"pooled": summarize(rows), "by_source": by_source,
+    report = {"pooled": summarize(rows), "by_source": by_source,
             "source_macro": {key: sum(values[key] for values in by_source.values()) / len(by_source)
-                             for key in ("outcome_f1", "answer_f1", "outcome_reward", "reward", "read_calls", "read_cost", "raw_read_cost", "format_reward", "format_failure_rate", "auxiliary_reward", "task_truncation_rate",
+                             for key in ("outcome_f1", "answer_f1", "outcome_reward", "reward", "read_calls", "read_cost", "raw_read_cost", "format_reward", "format_violation_count", "format_failure_rate", "auxiliary_reward", "task_truncation_rate",
                                          "repeated_read_rate", "repeated_read_calls", "repeated_read_call_rate",
                                          "no_new_evidence_calls", "no_new_evidence_call_rate") +
                                         (("judge_accuracy",) if all("judge_accuracy" in v for v in by_source.values()) else ())},
             "metric_scope": "Fixed configured Judge protocol (when enabled), separate QA F1, call cost and format penalty; not an official benchmark model configuration."}
+    navigation_keys = ("navigation_calls", "navigation_repeat_calls", "visible_navigation_noop_calls",
+                       "visible_navigation_penalty_calls", "format_decisions_visible_navigation",
+                       "segment_calls", "segment_no_new_evidence_calls", "segment_no_new_evidence_call_rate")
+    if any("navigation_calls" in values for values in by_source.values()):
+        for key in navigation_keys:
+            report["source_macro"][key] = sum(values.get(key, 0.0) for values in by_source.values()) / len(by_source)
+    return report
 
 
 def evaluate_with_policy(config, store, policy, split, output, limit=None):
     from contextlib import ExitStack
-    from .prompts import task_input_contract
+    from .prompts import configured_reader_input_contract, task_input_contract
     validate_directories(config, store, [split])
     env = make_environment(config, store, policy)
     with ExitStack() as cleanup:
@@ -461,7 +517,12 @@ def evaluate_with_policy(config, store, policy, split, output, limit=None):
         finally:
             policy.temperature = temperature
         report = metrics(rows)
-        report["task_input_contract"] = task_input_contract()
+        if config["reward"].get("formula") == "f1_cost_v1":
+            report["primary_metric"] = "outcome_f1"
+            report["primary_outcome_metric"] = "outcome_f1"
+            report["metric_scope"] = "Normalized word-overlap F1; validation/source_macro/outcome_f1 selects the primary checkpoint."
+        report["task_input_contract"] = task_input_contract(config.get("task_agent", {}).get("prompt_version", "legacy_v1"))
+        report["reader_input_contract"] = configured_reader_input_contract(config)
         report["scoring_protocol"] = scorer.provenance()
         atomic_json(Path(output) / "metrics.json", report)
         return report
@@ -469,7 +530,7 @@ def evaluate_with_policy(config, store, policy, split, output, limit=None):
 
 def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index, validation=None, *, dapo_state=None):
     import torch
-    from .prompts import task_input_contract
+    from .prompts import configured_reader_input_contract, task_input_contract
     if validation is not None:
         validation_scores(validation)
     destination = Path(run_dir) / f"checkpoint-{step:08d}"
@@ -479,7 +540,8 @@ def save_checkpoint(config, policy, optimizer, run_dir, step, epoch, next_index,
     policy.tokenizer.save_pretrained(temporary / "model")
     torch.save({"optimizer": optimizer.state_dict(), "step": step, "epoch": epoch, "next_index": next_index,
                 "policy_version": policy.policy_version, "config": config,
-                "task_input_contract": task_input_contract(),
+                "task_input_contract": task_input_contract(config.get("task_agent", {}).get("prompt_version", "legacy_v1")),
+                "reader_input_contract": configured_reader_input_contract(config),
                 **({"dapo_state": dapo_state} if dapo_state is not None else {})}, temporary / "trainer.pt")
     if validation is not None:
         atomic_json(temporary / "validation_metrics.json", validation)
@@ -497,7 +559,7 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
         from .training_dapo import train_dapo
         return train_dapo(config, max_groups=max_groups, resume=resume,
                           validate_before_training=validate_before_training)
-    from .resume import resume_metadata, validate_resume_config
+    from .resume import resume_metadata, validate_reader_input_contract, validate_resume_config
     if (fork_retrieval_resume or fork_id_protocol_resume or validate_before_training) and not resume:
         raise ValueError("Resume fork/baseline validation requires --resume")
     previous = resume_metadata(config, resume, fork_retrieval=fork_retrieval_resume,
@@ -509,7 +571,7 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
     from .grpo import CPUAdamW, GRPOUpdater
     from .monitoring import summary_writer_class, write_train_metrics, write_validation_metrics
     from .policy import HFPolicy, load_model, load_tokenizer, model_fingerprint
-    from .prompts import task_input_contract
+    from .prompts import configured_reader_input_contract, task_input_contract
     if not torch.cuda.is_available() and config["reader"]["device"].startswith("cuda"):
         raise RuntimeError("CUDA is unavailable; unit tests can run on CPU but real model training needs the allocated GPU")
     run_dir = Path(config["training"]["output_dir"])
@@ -545,7 +607,9 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
                     "prepare_identity": store.get_metadata("prepare_identity"),
                     "reader_trainable_parameters": sum(value.numel() for value in model.parameters() if value.requires_grad),
                     "parameterization": "full", "optimizer": "CPUAdamW_fp32_master_and_moments",
-                    "task_input_contract": task_input_contract(), "runtime_memory": runtime_memory}
+                    "task_input_contract": task_input_contract(),
+                    "reader_input_contract": configured_reader_input_contract(config),
+                    "runtime_memory": runtime_memory}
         announce("training_execution", **execution_settings(config))
         announce("training_memory", **runtime_memory)
         step, start_epoch, next_index = 0, 0, 0
@@ -561,6 +625,8 @@ def train(config, max_groups=None, resume=None, *, fork_retrieval_resume=False,
                          current=execution_settings(config), note="Sampling batches/RNG streams may change; committed optimizer state is preserved")
             validate_resume_config(state["config"], config, fork_retrieval=fork_retrieval_resume,
                                    fork_id_protocol=fork_id_protocol_resume)
+            validate_reader_input_contract(state, config, fork_retrieval=fork_retrieval_resume,
+                                           fork_id_protocol=fork_id_protocol_resume)
             if state["config"]["training"]["validation_every"] != config["training"]["validation_every"]:
                 announce("resume_validation_interval_changed",
                          previous=state["config"]["training"]["validation_every"],

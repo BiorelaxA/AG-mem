@@ -22,10 +22,12 @@ from urllib.parse import urlsplit
 
 from .core import InfrastructureError, append_json, canonical, digest
 from .policy import chat_token_ids
-from .prompts import task_input_contract, task_messages
+from .prompts import task_input_contract, task_messages, validate_task_prompt_version
 
 
 LIKELIHOOD_PROTOCOL = "task_reference_mean_logprob_v1"
+PREFIX_LIKELIHOOD_PROTOCOL = "task_reference_prefix_mean_logprob_v1"
+ANSWER_CONTINUATION_PREFIX = "<answer>\n"
 
 
 def _finite_number(value):
@@ -45,10 +47,16 @@ class ReferenceLikelihoodScorer:
     ``diagnostic`` and ``reward`` perform identical scoring.
     """
 
-    def __init__(self, service_config, store, config=None, tokenizer_factory=None):
+    def __init__(self, service_config, store, config=None, tokenizer_factory=None, *,
+                 prompt_version="legacy_v1"):
         self.service_config = dict(service_config)
         self.store = store
         self.config = dict(config or {})
+        self.prompt_version = validate_task_prompt_version(prompt_version)
+        self.task_contract = task_input_contract(self.prompt_version)
+        self.assistant_prefix = (ANSWER_CONTINUATION_PREFIX
+                                 if self.task_contract.get("answer_parser") in {
+                                     "answer_tag_v1", "answer_tag_partial_v1"} else "")
         self.mode = self.config.get("mode", "off")
         if self.mode not in {"off", "diagnostic", "reward"}:
             raise ValueError("Likelihood mode must be off, diagnostic or reward")
@@ -89,12 +97,26 @@ class ReferenceLikelihoodScorer:
         self.client = httpx.Client(timeout=self.service_config.get("timeout_seconds", 600), trust_env=not loopback)
 
     def provenance(self):
-        return {"protocol": LIKELIHOOD_PROTOCOL, "mode": self.mode, "model": self.identity,
-                "task_input_contract": task_input_contract(), "tau": self.tau,
+        result = {"protocol": LIKELIHOOD_PROTOCOL, "mode": self.mode, "model": self.identity,
+                "task_input_contract": self.task_contract, "tau": self.tau,
                 "reference_aggregation": self.reference_aggregation,
                 "target_tokens": "gold continuation only; no template or special tokens",
                 "probability_temperature": 1.0, "baseline": "same task with empty retrieved_evidence",
                 "max_context_tokens": self.max_context_tokens}
+        # Keep legacy provenance exactly stable for existing training resumes.
+        if self.assistant_prefix:
+            result.update(assistant_prefix=self.assistant_prefix,
+                          target_encoding="fixed_gold_ids_after_answer_prefix_v1")
+        return result
+
+    def prefix_provenance(self):
+        """Describe the stepwise scoring protocol independently of terminal reward."""
+        return {**self.provenance(), "protocol": PREFIX_LIKELIHOOD_PROTOCOL,
+                "baseline": "caller-supplied ordered evidence prefixes, including empty E_0",
+                "assistant_prefix": self.assistant_prefix,
+                "target_encoding": "fixed_gold_ids_after_answer_prefix_v1" if self.assistant_prefix
+                                   else "fixed_gold_ids_after_chat_prefix_v1",
+                "closing_answer_tag_scored": False}
 
     def close(self):
         if self.client is not None:
@@ -112,6 +134,36 @@ class ReferenceLikelihoodScorer:
                   "reference_token_count": None, "references": []}
         if self.mode == "off":
             return result
+        prefixes = self.score_prefixes(example, [evidence, []])
+        for row in prefixes["references"]:
+            with_memory, baseline = row["logprobs"]
+            result["references"].append({"index": row["index"], "token_count": row["token_count"],
+                                         "target_token_sha256": row["target_token_sha256"],
+                                         "logprob": with_memory, "baseline_logprob": baseline,
+                                         "delta": with_memory - baseline})
+        result["logprob"], result["baseline_logprob"] = prefixes["prefix_logprobs"]
+        result["delta"] = result["logprob"] - result["baseline_logprob"]
+        result["d"] = math.tanh(result["delta"] / self.tau)
+        result["reference_token_count"] = prefixes["reference_token_count"]
+        return result
+
+    def score_prefixes(self, example, evidence_prefixes):
+        """Return f(E) for each supplied evidence prefix, without composing reward.
+
+        Every complete gold alternative is encoded once and reused unchanged
+        across all prefixes. For answer-tag prompts, the fixed opening tag and
+        newline are context, not targets. Only gold tokens are scored: neither
+        the opening/closing tags nor any internal server generation contribute.
+        A closing tag is unnecessary because suffixes cannot affect earlier
+        token probabilities. The caller controls prefix order and computes
+        successive differences; this method never sees future evidence when
+        evaluating an earlier prefix.
+        """
+        if self.mode == "off":
+            raise ValueError("Prefix likelihood scoring requires an active likelihood mode")
+        if (not isinstance(evidence_prefixes, (list, tuple)) or not evidence_prefixes
+                or any(not isinstance(prefix, list) for prefix in evidence_prefixes)):
+            raise ValueError("Evidence prefixes must be a nonempty sequence of evidence lists")
         golds = example.gold_answers
         if (not isinstance(golds, list) or not golds
                 or any(not isinstance(gold, str) or not gold.strip() for gold in golds)):
@@ -119,28 +171,39 @@ class ReferenceLikelihoodScorer:
         if example.answer_mode == "choice" and any(gold not in example.options for gold in golds):
             raise ValueError("Choice likelihood targets must be valid option labels")
         tokenizer = self._get_tokenizer()
-        context_ids = chat_token_ids(tokenizer, task_messages(example, evidence))
-        baseline_ids = chat_token_ids(tokenizer, task_messages(example, []))
-        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
-        for index, gold in enumerate(golds):
-            target_ids = tokenizer.encode(gold, add_special_tokens=False)
-            if (not isinstance(target_ids, list) or not target_ids
-                    or any(type(token) is not int or token < 0 for token in target_ids)):
-                raise ValueError("Gold answer tokenization must produce nonempty integer IDs")
-            if special_ids.intersection(target_ids):
-                raise ValueError("Gold answer contains a special/template token")
-            with_memory = self._mean_logprob(context_ids, target_ids)
-            baseline = self._mean_logprob(baseline_ids, target_ids)
+        # Fast tokenizers may mutate backend padding/truncation settings during
+        # encoding. Scoring workers share this tokenizer, so serialize encoding
+        # only; independent HTTP requests must remain concurrent.
+        with self._tokenizer_lock:
+            continuation_ids = (tokenizer.encode(self.assistant_prefix, add_special_tokens=False)
+                                if self.assistant_prefix else [])
+            if (not isinstance(continuation_ids, list)
+                    or (self.assistant_prefix and not continuation_ids)
+                    or any(type(token) is not int or token < 0 for token in continuation_ids)):
+                raise ValueError("Assistant continuation tokenization must produce integer IDs")
+            contexts = [chat_token_ids(tokenizer, task_messages(example, evidence, self.prompt_version))
+                        + continuation_ids for evidence in evidence_prefixes]
+            special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+            targets = []
+            for gold in golds:
+                target_ids = tokenizer.encode(gold, add_special_tokens=False)
+                if (not isinstance(target_ids, list) or not target_ids
+                        or any(type(token) is not int or token < 0 for token in target_ids)):
+                    raise ValueError("Gold answer tokenization must produce nonempty integer IDs")
+                if special_ids.intersection(target_ids):
+                    raise ValueError("Gold answer contains a special/template token")
+                targets.append(target_ids)
+        result = {"protocol": PREFIX_LIKELIHOOD_PROTOCOL,
+                  "task_input_contract": self.task_contract,
+                  "prefix_logprobs": [], "reference_token_count": sum(map(len, targets)),
+                  "references": []}
+        for index, target_ids in enumerate(targets):
+            logprobs = [self._mean_logprob(context_ids, target_ids) for context_ids in contexts]
             result["references"].append({"index": index, "token_count": len(target_ids),
                                          "target_token_sha256": digest(target_ids),
-                                         "logprob": with_memory, "baseline_logprob": baseline,
-                                         "delta": with_memory - baseline})
-        references = result["references"]
-        result["logprob"] = math.fsum(row["logprob"] for row in references) / len(references)
-        result["baseline_logprob"] = math.fsum(row["baseline_logprob"] for row in references) / len(references)
-        result["delta"] = result["logprob"] - result["baseline_logprob"]
-        result["d"] = math.tanh(result["delta"] / self.tau)
-        result["reference_token_count"] = sum(row["token_count"] for row in references)
+                                         "logprobs": logprobs})
+        result["prefix_logprobs"] = [math.fsum(row["logprobs"][index] for row in result["references"])
+                                     / len(targets) for index in range(len(contexts))]
         return result
 
     def _mean_logprob(self, context_ids, target_ids):

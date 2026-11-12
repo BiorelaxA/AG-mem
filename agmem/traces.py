@@ -23,6 +23,11 @@ def compact_group(group: dict) -> dict:
                         "step": step + 1,
                         "reader_output": decision["completion"]["text"],
                         "action": decision["action"],
+                        **{key: decision["tool_result"][key] for key in
+                           ("action_kind", "expanded_parent_ids", "display_parent_ids", "evicted_parent_ids",
+                            "parent_id", "repeated_navigation", "visible_navigation_noop", "selected_ids",
+                            "visible_navigation_ids")
+                           if key in (decision.get("tool_result") or {})},
                         **({"format_violations": decision["format_violations"]}
                            if decision.get("format_violations") else {}),
                         **({
@@ -53,9 +58,10 @@ def compact_group(group: dict) -> dict:
                 "task_completion": row.get("task_completion", {}),
                 "outcome_f1": row.get("answer_f1") if row.get("answer_f1") is not None else row["outcome"],
                 **{key: row[key] for key in ("judge_score", "auxiliary_reward", "likelihood", "advantage") if key in row},
+                **({"process_attribution": row["process_attribution"]} if row.get("process_attribution") else {}),
                 "reward": row["reward"],
                 # Historical groups keep their recorded reward unchanged.
-                **{key: row[key] for key in ("read_cost", "raw_read_cost", "outcome_reward", "format_failure", "format_reward") if key in row},
+                **{key: row[key] for key in ("read_cost", "raw_read_cost", "outcome_reward", "format_failure", "format_reward", "format_violation_count") if key in row},
             }
             for index, row in enumerate(group["rollouts"])
         ],

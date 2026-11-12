@@ -134,8 +134,8 @@ def latest_checkpoint(train_dir):
 
 def train_and_test(config, config_path, job_dir):
     sources = config["data"]["sources"]
-    if sources != ["locomo", "split_longmemeval_s"]:
-        raise ValueError("Pilot train/evaluate job must select LoCoMo and LongMemEval-S")
+    if sources not in (["locomo"], ["locomo", "split_longmemeval_s"]):
+        raise ValueError("Pilot train/evaluate job must select LoCoMo, optionally with LongMemEval-S")
     train_dir = Path(config["training"]["output_dir"])
     # Hold selected source locks throughout train and test so directory snapshots
     # and empty_pending replacements cannot change underneath Reader rollouts.
@@ -181,7 +181,8 @@ def train_and_test(config, config_path, job_dir):
         selected = best_checkpoint(train_dir)
         checkpoint = selected or checkpoint
         announce("test_checkpoint_selected", checkpoint=str(checkpoint),
-                 selection="validation/source_macro/reward" if selected else "latest_no_validation_checkpoint")
+                 selection=("validation/source_macro/outcome_f1" if config["reward"].get("formula") == "f1_cost_v1"
+                            else "validation/source_macro/reward") if selected else "latest_no_validation_checkpoint")
         # Build test only after training, so new test histories never delay the
         # first GRPO step. Test stores are separate from the fixed train split.
         for source in sources:

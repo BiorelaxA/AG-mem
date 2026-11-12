@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import re
 
 from .core import InfrastructureError, digest
@@ -46,11 +47,58 @@ def parse_longmemeval(text: str) -> float:
     return float(text.strip().lower() == "yes")
 
 
-def prompt_for(example, reference: str, prediction: str, protocol: str):
+def template_hashes(templates):
+    return {
+        "locomo_refined": hashlib.sha256(templates["locomo_refined"].encode()).hexdigest(),
+        "longmemeval_official": {name: hashlib.sha256(text.encode()).hexdigest()
+                                 for name, text in templates["longmemeval_official"].items()},
+    }
+
+
+def load_judge_templates(config=None):
+    """Load an optional frozen evaluation protocol without changing global prompts."""
+    config = config or {}
+    templates = {"locomo_refined": LOCOMO_REFINED, "longmemeval_official": dict(LONGMEMEVAL_TEMPLATES)}
+    upstream = UPSTREAM
+    path = config.get("template_file")
+    if path is not None:
+        snapshot = json.loads(Path(path).read_text())
+        if not isinstance(snapshot, dict) or snapshot.get("format_version") != 1:
+            raise ValueError("Judge template snapshot requires format_version=1")
+        templates, upstream = snapshot.get("templates"), snapshot.get("upstream")
+        if (not isinstance(templates, dict) or set(templates) != set(DEFAULT_PROTOCOLS.values())
+                or not isinstance(templates.get("locomo_refined"), str)
+                or not templates["locomo_refined"].strip()
+                or not isinstance(templates.get("longmemeval_official"), dict)
+                or set(templates["longmemeval_official"]) != set(LONGMEMEVAL_TEMPLATES)
+                or any(not isinstance(text, str) or not text.strip()
+                       for text in templates["longmemeval_official"].values())):
+            raise ValueError("Judge template snapshot must contain complete LoCoMo and LongMemEval templates")
+        if (not isinstance(upstream, dict) or set(upstream) != set(templates)
+                or any(not isinstance(value, dict) for value in upstream.values())):
+            raise ValueError("Judge template snapshot lacks source provenance")
+        try:
+            templates["locomo_refined"].format(question="q", gold_answer="gold", generated_answer="answer")
+            for text in templates["longmemeval_official"].values():
+                text.format("q", "gold", "answer")
+        except (KeyError, ValueError, IndexError) as exc:
+            raise ValueError("Judge template snapshot contains invalid placeholders") from exc
+        if snapshot.get("template_sha256") != template_hashes(templates):
+            raise ValueError("Judge template snapshot content SHA-256 does not match its manifest")
+    hashes = template_hashes(templates)
+    expected = config.get("expected_template_sha256")
+    if expected is not None and expected != hashes:
+        raise ValueError("Judge template SHA-256 differs from the required evaluation protocol")
+    return templates, json.loads(json.dumps(upstream)), hashes
+
+
+def prompt_for(example, reference: str, prediction: str, protocol: str, *, templates=None):
     """Use upstream question/gold/prediction inputs; no retrieved memory or actions."""
+    locomo = LOCOMO_REFINED if templates is None else templates["locomo_refined"]
+    longmemeval = LONGMEMEVAL_TEMPLATES if templates is None else templates["longmemeval_official"]
     if protocol == "locomo_refined":
-        return LOCOMO_REFINED.format(question=example.query, gold_answer=reference,
-                                     generated_answer=prediction), parse_refined
+        return locomo.format(question=example.query, gold_answer=reference,
+                             generated_answer=prediction), parse_refined
     if protocol == "longmemeval_official":
         metadata = getattr(example, "judge_metadata", {})
         if not isinstance(metadata, dict):
@@ -58,10 +106,10 @@ def prompt_for(example, reference: str, prediction: str, protocol: str):
         question_id, question_type = metadata.get("question_id"), metadata.get("question_type")
         if not isinstance(question_id, str) or not question_id:
             raise ValueError("LongMemEval Judge requires original question_id (including _abs)")
-        if question_type not in LONGMEMEVAL_TEMPLATES or question_type == "abstention":
+        if question_type not in longmemeval or question_type == "abstention":
             raise ValueError(f"Unsupported LongMemEval question_type: {question_type!r}")
         branch = "abstention" if "_abs" in question_id else question_type
-        return LONGMEMEVAL_TEMPLATES[branch].format(example.query, reference, prediction), parse_longmemeval
+        return longmemeval[branch].format(example.query, reference, prediction), parse_longmemeval
     raise ValueError(f"Unknown Judge protocol: {protocol!r}")
 
 
@@ -77,15 +125,12 @@ class JudgeScorer:
         self.seed = self.config.get("seed", 42)
         if type(self.seed) is not int or self.seed < 0:
             raise ValueError("Judge seed must be a nonnegative integer")
+        self.templates, upstream, hashes = load_judge_templates(self.config)
         self.service = ChatService(service_config, store, "judge")
         self._provenance = {
             "model": dict(self.service.identity),
-            "protocols": dict(self.protocols), "upstream": UPSTREAM,
-            "template_sha256": {
-                "locomo_refined": hashlib.sha256(LOCOMO_REFINED.encode()).hexdigest(),
-                "longmemeval_official": {name: hashlib.sha256(text.encode()).hexdigest()
-                                         for name, text in LONGMEMEVAL_TEMPLATES.items()},
-            },
+            "protocols": dict(self.protocols), "upstream": upstream,
+            "template_sha256": hashes,
             "parser": PARSER_VERSION, "gold_aggregation": "any_complete_reference_v1",
             "input": "upstream_question_gold_prediction_v1",
             "temperature": 0.0, "enable_thinking": False, "seed": self.seed,
@@ -105,7 +150,7 @@ class JudgeScorer:
         protocol = self.protocols.get(example.source)
         if protocol is None:
             raise ValueError(f"No Judge protocol configured for source: {example.source!r}")
-        prompt_for(example, references[0], "", protocol)
+        prompt_for(example, references[0], "", protocol, templates=self.templates)
 
     def score(self, example, prediction: str) -> float:
         self.validate_example(example)
@@ -116,7 +161,7 @@ class JudgeScorer:
         # Alternatives are whole acceptable answers. Never split a list of facts
         # inside one reference into individually sufficient answers.
         for reference in dict.fromkeys(references):
-            prompt, parse = prompt_for(example, reference, prediction, protocol)
+            prompt, parse = prompt_for(example, reference, prediction, protocol, templates=self.templates)
             text = self.service.complete([{"role": "user", "content": prompt}], self.max_tokens,
                                          seed=self.seed, cache_scope=self.cache_scope, validator=parse)
             try:

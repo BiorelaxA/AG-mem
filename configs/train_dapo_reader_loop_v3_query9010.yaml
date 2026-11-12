@@ -1,0 +1,8 @@
+extends: train_dapo_reader_loop_v3_val100.yaml
+# Merge LoCoMo train/validation and split distinct queries 90:10 (seed 42).
+# Preserve all test data and the existing LongMemEval-S partitions.
+data:
+  input_root: data/processed/locomo_query9010_seed42_20261102
+  prepared_root: runs/locomo_longmemeval/prepared_locomo_query9010_seed42_20261102
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_max1_no_cost_reader_loop_v3_query9010/train

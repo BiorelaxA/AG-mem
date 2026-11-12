@@ -1,4 +1,5 @@
 from copy import deepcopy
+from itertools import islice
 import math
 import unittest
 from unittest.mock import Mock
@@ -61,25 +62,26 @@ class DynamicSamplingTests(unittest.TestCase):
         self.assertEqual(len(groups), 16)
         self.assertTrue(all(len(group) == 8 for group in groups))
         self.assertEqual(report["generation_batches"], 2)
-        self.assertEqual(report["candidate_groups"], 64)
+        self.assertEqual(report["candidate_groups"], 61)
         self.assertEqual([row["selected_groups"] for row in rounds], [8, 16])
         self.assertEqual(sum(row["selected"] for row in candidates), 16)
-        self.assertEqual(report["accepted_rate"], 0.25)
-        self.assertEqual(report["judge_all_wrong_rate"], 0.75)
-        self.assertEqual(sum(report["source_candidates"].values()), 64)
-        self.assertEqual(sampler.state_dict()["candidate_index"], 64)
+        self.assertEqual(report["accepted_rate"], 16 / 61)
+        self.assertEqual(report["judge_all_wrong_rate"], 45 / 61)
+        self.assertEqual(sum(report["source_candidates"].values()), 61)
+        self.assertEqual(sampler.state_dict()["candidate_index"], 61)
         self.assertEqual(sampler.state_dict()["batch_index"], 1)
         self.assertTrue(all(row.policy_version == 7 for group in groups for row in group))
 
-    def test_generation_batch_is_finished_and_extra_accepted_groups_are_audited(self):
+    def test_serial_sampling_stops_at_target_without_consuming_next_candidate(self):
         sampler = DynamicGroupSampler(settings(), examples(4))
         recorded = []
         groups, report = sampler.collect(lambda example, index: group_for(example), 7,
                                          record_candidate=lambda group, result: recorded.append(result))
         self.assertEqual(len(groups), 2)
-        self.assertEqual(report["accepted_groups"], 3)
-        self.assertEqual([row["selected"] for row in recorded], [True, True, False])
-        self.assertEqual([row["candidate_id"] for row in recorded], [0, 1, 2])
+        self.assertEqual(report["accepted_groups"], 2)
+        self.assertEqual([row["selected"] for row in recorded], [True, True])
+        self.assertEqual([row["candidate_id"] for row in recorded], [0, 1])
+        self.assertEqual(sampler.next_index, 2)
         self.assertEqual({row["batch_id"] for row in recorded}, {"batch-00000000"})
 
     def test_budget_exhaustion_is_explicit_and_does_not_return_partial_batch(self):
@@ -150,7 +152,7 @@ class DynamicSamplingTests(unittest.TestCase):
 
     def test_resume_cursor_preserves_future_candidates_and_epoch_shuffle(self):
         config = settings(epochs=2, candidate_groups=3, target_groups=2)
-        source = examples(5)
+        source = examples(3)
         original = DynamicGroupSampler(config, source)
         original.collect(lambda example, index: group_for(example), 7)
         state = original.state_dict()
@@ -161,17 +163,283 @@ class DynamicSamplingTests(unittest.TestCase):
                 records.append((example.sample_id, index))
                 return group_for(example, version=9)
             return collect
-        # The second batch crosses an epoch boundary (positions 3,4 then 0).
+        # The second batch crosses an epoch boundary (position 2 then 0).
         groups_left, report_left = original.collect(collector(left), 9)
         groups_right, report_right = restored.collect(collector(right), 9)
         self.assertEqual(left, right)
-        self.assertEqual([index for _, index in left], [3, 4, 5])
+        self.assertEqual([index for _, index in left], [2, 3])
         self.assertEqual(report_left, report_right)
         self.assertEqual([[row.to_dict() for row in group] for group in groups_left],
                          [[row.to_dict() for row in group] for group in groups_right])
         self.assertEqual(original.state_dict(), restored.state_dict())
         self.assertEqual(original.state_dict()["epoch"], 1)
         self.assertEqual(original.state_dict()["next_index"], 1)
+
+
+class StreamingSamplingTests(unittest.TestCase):
+    @staticmethod
+    def collector(score, *, on_yield=None, on_close=None):
+        """Model the production collector's fixed four-group windows."""
+        def collect(candidates):
+            try:
+                while True:
+                    pending = list(islice(candidates, 4))
+                    if not pending:
+                        break
+                    for example, index in pending:
+                        if on_yield:
+                            on_yield(example, index)
+                        yield example, index, score(example, index)
+            finally:
+                if on_close:
+                    on_close()
+        return collect
+
+    def test_lazy_refill_preserves_all_candidates_order_and_complete_groups(self):
+        config = judge_cost_settings(group_size=8, candidate_groups=32, target_groups=16)
+        source = examples(80)
+        sampler = DynamicGroupSampler(config, source)
+        recorded, rounds, closed = [], [], []
+        fallback = Mock(side_effect=AssertionError("Serial fallback must not run"))
+
+        def score(example, index):
+            return group_for(example, [-1, 1] * 4 if index % 4 == 0 else [-1] * 8)
+
+        def before_yield(example, index):
+            self.assertEqual(sampler.candidate_index, index)
+            self.assertGreater(sampler.next_index, index)
+            self.assertLessEqual(sampler.next_index - index, 4)
+
+        def record_round(report):
+            # The collector is drained before round reports or optimizer work.
+            self.assertEqual(len(closed), report["generation_batches"])
+            rounds.append(deepcopy(report))
+
+        groups, report = sampler.collect(
+            fallback, 7,
+            collect_candidates=self.collector(score, on_yield=before_yield, on_close=lambda: closed.append(True)),
+            record_candidate=lambda group, result: recorded.append(deepcopy(result)),
+            record_round=record_round)
+        fallback.assert_not_called()
+        self.assertEqual(len(groups), 16)
+        self.assertTrue(all(len(group) == 8 for group in groups))
+        self.assertEqual([item["candidate_id"] for item in recorded], list(range(64)))
+        self.assertEqual([item["candidate_id"] for item in recorded if item["selected"]], list(range(0, 64, 4)))
+        self.assertEqual([item["selected_groups"] for item in rounds], [8, 16])
+        self.assertEqual(report["generation_batches"], 2)
+        self.assertEqual(report["candidate_groups"], 64)
+        self.assertEqual(sampler.state_dict()["candidate_index"], 64)
+        self.assertEqual(sampler.state_dict()["batch_index"], 1)
+
+        serial = DynamicGroupSampler(config, source)
+        serial_groups, serial_report = serial.collect(score, 7)
+        # Serial sampling stops immediately at candidate 60; concurrent
+        # sampling also finishes the three already admitted window siblings.
+        self.assertEqual(serial_report["candidate_groups"], 61)
+        self.assertEqual([[row.to_dict() for row in group] for group in groups],
+                         [[row.to_dict() for row in group] for group in serial_groups])
+        self.assertEqual(serial.candidate_index, 61)
+
+    def test_full_target_stops_before_admitting_another_window(self):
+        sampler = DynamicGroupSampler(settings(group_size=8, candidate_groups=32, target_groups=16), examples(40))
+        recorded = []
+        groups, report = sampler.collect(None, 7, collect_candidates=self.collector(
+            lambda example, index: group_for(example, [-1, 1] * 4)),
+            record_candidate=lambda group, result: recorded.append(result))
+        self.assertEqual(len(groups), 16)
+        self.assertEqual(report["accepted_groups"], 16)
+        self.assertEqual([row["selected"] for row in recorded], [True] * 16)
+        self.assertEqual([row["candidate_id"] for row in recorded], list(range(16)))
+        self.assertEqual(sampler.candidate_index, 16)
+
+    def test_refill_stops_at_36_candidates_instead_of_finishing_64(self):
+        config = settings(group_size=8, candidate_groups=32, target_groups=16)
+        sampler = DynamicGroupSampler(config, examples(80))
+        recorded, rounds = [], []
+
+        def score(example, index):
+            mixed = index < 14 or index in (34, 35)
+            return group_for(example, [-1, 1] * 4 if mixed else [-1] * 8)
+
+        groups, report = sampler.collect(None, 7, collect_candidates=self.collector(score),
+            record_candidate=lambda group, result: recorded.append(result), record_round=rounds.append)
+        self.assertEqual(len(groups), 16)
+        self.assertEqual([row["selected_groups"] for row in rounds], [14, 16])
+        self.assertEqual(report["generation_batches"], 2)
+        self.assertEqual(report["candidate_groups"], 36)
+        self.assertEqual([row["candidate_id"] for row in recorded], list(range(36)))
+        self.assertEqual(sampler.candidate_index, 36)
+        self.assertEqual(sampler.next_index, 36)
+        self.assertFalse(report["dataset_exhausted"])
+
+    def test_mid_window_target_drains_siblings_and_resume_starts_at_next_candidate(self):
+        config, source = settings(candidate_groups=32, target_groups=2), examples(20)
+        sampler = DynamicGroupSampler(config, source)
+        recorded, closed = [], []
+        groups, report = sampler.collect(None, 7, collect_candidates=self.collector(
+            lambda example, index: group_for(example), on_close=lambda: closed.append(True)),
+            record_candidate=lambda group, result: recorded.append(result))
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(closed, [True])
+        self.assertEqual([row["selected"] for row in recorded], [True, True, False, False])
+        self.assertEqual(report["accepted_groups"], 4)
+        self.assertEqual(sampler.next_index, 4)
+        restored = DynamicGroupSampler(config, source, **sampler.state_dict())
+        seen = []
+        restored.collect(None, 9, collect_candidates=self.collector(
+            lambda example, index: group_for(example, version=9),
+            on_yield=lambda example, index: seen.append(index)))
+        self.assertEqual(seen, [4, 5, 6, 7])
+        self.assertEqual(restored.candidate_index, 8)
+        self.assertEqual(restored.next_index, 8)
+
+    def test_failure_in_admitted_sibling_is_not_hidden_after_target_is_reached(self):
+        sampler = DynamicGroupSampler(settings(candidate_groups=32, target_groups=1), examples(20))
+        recorded, closed = [], []
+
+        def score(example, index):
+            if index == 2:
+                raise RuntimeError("in-flight scoring failed")
+            return group_for(example)
+
+        with self.assertRaisesRegex(RuntimeError, "in-flight scoring failed"):
+            sampler.collect(None, 7, collect_candidates=self.collector(
+                score, on_close=lambda: closed.append(True)),
+                record_candidate=lambda group, result: recorded.append(result))
+        self.assertEqual([row["selected"] for row in recorded], [True, False])
+        self.assertEqual(closed, [True])
+        self.assertEqual(sampler.batch_index, 0)
+
+    def test_rejects_out_of_order_duplicate_missing_unrequested_or_foreign_results(self):
+        for failure in ("out_of_order", "duplicate", "missing", "unrequested", "foreign", "early_end"):
+            with self.subTest(failure=failure):
+                sampler = DynamicGroupSampler(settings(), examples(5))
+                closed = []
+
+                def collect(candidates):
+                    try:
+                        if failure == "unrequested":
+                            example = examples(1)[0]
+                            yield example, 0, group_for(example)
+                            return
+                        if failure == "early_end":
+                            return
+                        pending = list(candidates)
+                        if failure == "out_of_order":
+                            pending.reverse()
+                        elif failure == "duplicate":
+                            pending.insert(1, pending[0])
+                        elif failure == "missing":
+                            pending.pop()
+                        elif failure == "foreign":
+                            example, index = pending[0]
+                            example = deepcopy(example)
+                            example.query = "changed question"
+                            pending[0] = example, index
+                        for example, index in pending:
+                            yield example, index, group_for(example)
+                    finally:
+                        closed.append(True)
+
+                with self.assertRaisesRegex(ValueError, "DAPO candidate"):
+                    sampler.collect(None, 7, collect_candidates=collect)
+                self.assertEqual(closed, [True])
+                self.assertEqual(sampler.batch_index, 0)
+                self.assertEqual(sampler.candidate_index, {"duplicate": 1, "missing": 2}.get(failure, 0))
+
+    def test_invalid_groups_close_stream_before_raising_and_do_not_commit_candidate(self):
+        for failure in ("short", "version", "sample", "memory", "score"):
+            with self.subTest(failure=failure):
+                sampler = DynamicGroupSampler(settings(), examples(5))
+                closed = []
+
+                def score(example, index):
+                    group = group_for(example)
+                    if failure == "short":
+                        group.pop()
+                    elif failure == "version":
+                        group[-1].policy_version = 8
+                    elif failure == "sample":
+                        group[-1].sample_id = "another sample"
+                    elif failure == "memory":
+                        group[-1].memory_id = "another memory"
+                    else:
+                        group[-1].judge_score = float("nan")
+                    return group
+
+                with self.assertRaises(ValueError):
+                    sampler.collect(None, 7, collect_candidates=self.collector(score, on_close=lambda: closed.append(True)))
+                self.assertEqual(closed, [True])
+                self.assertEqual(sampler.candidate_index, 0)
+
+    def test_scoring_or_audit_failure_closes_stream_before_propagation(self):
+        for failure in ("scoring", "recording"):
+            with self.subTest(failure=failure):
+                sampler = DynamicGroupSampler(settings(), examples(5))
+                closed = []
+
+                def score(example, index):
+                    if failure == "scoring":
+                        raise RuntimeError("scoring failed")
+                    return group_for(example)
+
+                def record(group, result):
+                    raise RuntimeError("recording failed")
+
+                with self.assertRaisesRegex(RuntimeError, failure + " failed"):
+                    sampler.collect(None, 7, collect_candidates=self.collector(score, on_close=lambda: closed.append(True)),
+                                    record_candidate=record)
+                self.assertEqual(closed, [True])
+                self.assertEqual(sampler.batch_index, 0)
+
+    def test_streaming_refill_budget_and_dataset_tail_match_serial(self):
+        config = settings(max_num_gen_batches=2)
+        sampler = DynamicGroupSampler(config, examples(20))
+        closed, reports = [], []
+
+        def score(example, index):
+            return group_for(example, (-1, 1) if index == 0 else (-1, -1))
+
+        with self.assertRaisesRegex(RuntimeError, "exhausted 2 generation batches: 1/2"):
+            sampler.collect(None, 7, collect_candidates=self.collector(score, on_close=lambda: closed.append(True)),
+                            record_round=lambda report: reports.append(deepcopy(report)))
+        self.assertEqual(len(closed), 2)
+        self.assertEqual(reports[-1]["candidate_groups"], 6)
+        self.assertEqual(sampler.candidate_index, 6)
+        self.assertEqual(sampler.batch_index, 0)
+
+        for size in (1, 3, 5):
+            with self.subTest(size=size):
+                source = examples(size)
+                parallel, serial = DynamicGroupSampler(config, source), DynamicGroupSampler(config, source)
+                result = parallel.collect(None, 7, collect_candidates=self.collector(score))
+                expected = serial.collect(score, 7)
+                self.assertEqual(result, expected)
+                self.assertEqual(parallel.state_dict(), serial.state_dict())
+                self.assertEqual(result[0], [])
+                self.assertTrue(result[1]["dataset_exhausted"])
+                self.assertEqual(result[1]["dropped_tail_groups"], 1)
+
+    def test_stream_resume_preserves_candidate_ids_and_shuffle_across_epoch(self):
+        config, source = settings(epochs=2), examples(5)
+        sampler = DynamicGroupSampler(config, source)
+        sampler.collect(None, 7, collect_candidates=self.collector(lambda example, index: group_for(example)))
+        restored = DynamicGroupSampler(config, source, **sampler.state_dict())
+        original_seen, restored_seen = [], []
+
+        def score(example, index):
+            return group_for(example, version=9)
+
+        original_result = sampler.collect(None, 9, collect_candidates=self.collector(
+            score, on_yield=lambda example, index: original_seen.append((example.sample_id, index))))
+        restored_result = restored.collect(None, 9, collect_candidates=self.collector(
+            score, on_yield=lambda example, index: restored_seen.append((example.sample_id, index))))
+        self.assertEqual(original_seen, restored_seen)
+        self.assertEqual([index for _, index in original_seen], [3, 4, 5])
+        self.assertEqual(original_result, restored_result)
+        self.assertEqual(sampler.state_dict(), restored.state_dict())
+        self.assertEqual(sampler.epoch, 1)
+        self.assertEqual(sampler.next_index, 1)
 
 
 class GroupAssessmentTests(unittest.TestCase):
@@ -338,9 +606,8 @@ class JudgeCostGroupTests(unittest.TestCase):
                         self.assertGreater(row.advantage, 0) if judge else self.assertLess(row.advantage, 0)
                         self.assertAlmostEqual(row.advantage, (row.reward - mean) / (std + 1e-6))
 
-    def test_new_protocol_rejects_reward_filter_std_floor_and_auxiliary_reward(self):
-        for section, key, value, message in (("training", "filter_metric", "reward", "filter_metric=judge"),
-                                              ("training", "advantage_std_floor", 0.5, "advantage_std_floor=0"),
+    def test_new_protocol_rejects_std_floor_and_auxiliary_reward(self):
+        for section, key, value, message in (("training", "advantage_std_floor", 0.5, "advantage_std_floor=0"),
                                               ("reward", "likelihood", {"mode": "reward"}, "off/diagnostic")):
             config = judge_cost_settings()
             config[section][key] = value
@@ -372,6 +639,83 @@ class JudgeCostGroupTests(unittest.TestCase):
         self.assertEqual(report["judge_all_wrong_rate"], 0.25)
         self.assertEqual(report["judge_mixed_rate"], 0.5)
         self.assertEqual(report["selected_groups"], 2)
+
+
+class RewardOnlyGroupTests(unittest.TestCase):
+    def setUp(self):
+        self.config = judge_cost_settings(group_size=8, filter_min_std=0.0)
+        self.config["training"]["filter_metric"] = "reward"
+        self.config["reward"]["read_call_cost"] = 0.0
+        self.example = examples(1)[0]
+        validate_dapo_config(self.config)
+
+    def test_uniform_correctness_with_format_signal_keeps_all_eight_rollouts(self):
+        for judge in (0, 1):
+            rewards = [2 * judge - 1 - 0.1 * (i % 2) for i in range(8)]
+            group = group_for(self.example, rewards, judges=[judge] * 8)
+            with self.subTest(judge=judge):
+                result = assess_group(group, self.config)
+                self.assertTrue(result["accepted"])
+                self.assertTrue(result["cost_format_only_signal"])
+                self.assertTrue(result["no_unmasked_judge_signal"])
+                self.assertEqual(len(group), 8)
+                self.assertEqual(sum(row.advantage > 0 for row in group), 4)
+                self.assertEqual(sum(row.advantage < 0 for row in group), 4)
+
+    def test_identical_decimal_rewards_have_exactly_zero_advantages(self):
+        for reward in (1.0, 0.9, 0.7, -1.0, -1.1, -1.3):
+            with self.subTest(reward=reward):
+                group = group_for(self.example, [reward] * 8)
+                result = assess_group(group, self.config)
+                self.assertFalse(result["accepted"])
+                self.assertTrue(result["zero_reward_variance"])
+                self.assertEqual(result["reward_std"], 0.0)
+                self.assertEqual([row.advantage for row in group], [0.0] * 8)
+
+    def test_masked_minority_judge_no_longer_blocks_nonzero_trainable_advantages(self):
+        for minority in (0, 1):
+            judges = [minority] + [1 - minority] * 7
+            group = group_for(self.example, [2 * j - 1 for j in judges], judges, truncated=(0,))
+            result = assess_group(group, self.config)
+            self.assertTrue(result["accepted"])
+            self.assertTrue(result["no_unmasked_judge_signal"])
+            self.assertEqual(len(group), 8)
+            self.assertTrue(all(row.advantage != 0 for row in group[1:]))
+
+    def test_no_signal_in_trainable_tokens_is_still_filtered(self):
+        # Six remaining trajectories equal the full-group reward mean.
+        for cause in ("truncated", "empty_tokens"):
+            group = group_for(self.example, [-1.0, -1.25] + [-1.125] * 6, judges=[0] * 8)
+            for row in group[:2]:
+                completion = row.decisions[0].completion
+                if cause == "truncated":
+                    completion.truncated = True
+                else:
+                    completion.token_ids = []
+                    completion.old_logprobs = []
+            with self.subTest(cause=cause):
+                result = assess_group(group, self.config)
+                self.assertFalse(result["accepted"])
+                self.assertTrue(result["no_unmasked_signal"])
+                self.assertGreater(result["reward_std"], 0)
+
+    def test_collection_selects_uniform_and_mixed_groups_without_dropping_rollouts(self):
+        config = deepcopy(self.config)
+        config["training"].update(candidate_groups=4, target_groups=3)
+        recorded = []
+
+        def collect(example, index):
+            judges = [0] * 8 if index < 2 else [1] * 8 if index == 2 else [0, 1] * 4
+            rewards = [2 * j - 1 - (0.1 * (i % 2) if index else 0) for i, j in enumerate(judges)]
+            return group_for(example, rewards, judges)
+
+        groups, report = DynamicGroupSampler(config, examples(4)).collect(
+            collect, 7, record_candidate=lambda group, result: recorded.append(result))
+        self.assertEqual([r["selected"] for r in recorded], [False, True, True, True])
+        self.assertEqual(len(groups), 3)
+        self.assertTrue(all(len(group) == 8 for group in groups))
+        self.assertEqual(report["selected_groups"], 3)
+        self.assertEqual(report["generation_batches"], 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ParentDirectoryV1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "directory.v1"
+    },
+    "bank_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "directory_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_kind": {
+      "enum": [
+        "dialogue",
+        "agent"
+      ]
+    },
+    "order": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "raw": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "iso": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "raw",
+        "iso",
+        "timezone"
+      ]
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "header_record_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "start_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "block_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "body_token_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokenizer_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "header_record_ids",
+        "start_record_id",
+        "end_record_id",
+        "block_count",
+        "record_count",
+        "body_token_count",
+        "tokenizer_id"
+      ]
+    },
+    "children": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "parent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "maxItems": 12
+          },
+          "start_reason": {
+            "enum": [
+              "session_start",
+              "semantic",
+              "window_limit"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "start_block": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "end_block": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "start_record_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "end_record_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "block_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "record_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "body_token_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "start_block",
+              "end_block",
+              "start_record_id",
+              "end_record_id",
+              "block_count",
+              "record_count",
+              "body_token_count"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "parent_id",
+          "order",
+          "title",
+          "content",
+          "entities",
+          "start_reason",
+          "source"
+        ]
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "complete",
+            "fallback",
+            "empty"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "single_session",
+            "windowed"
+          ]
+        },
+        "writer_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "writer_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt_version": {
+          "const": "directory-writer.v1"
+        },
+        "block_policy": {
+          "const": "block.v1"
+        },
+        "source_hash": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "status",
+        "mode",
+        "writer_model",
+        "writer_revision",
+        "prompt_version",
+        "block_policy",
+        "source_hash"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "bank_id",
+    "directory_version",
+    "id",
+    "source_kind",
+    "order",
+    "time",
+    "participants",
+    "title",
+    "content",
+    "entities",
+    "source",
+    "children",
+    "build"
+  ]
+}

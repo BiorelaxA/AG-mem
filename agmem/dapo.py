@@ -12,6 +12,7 @@ import math
 
 from .core import canonical, digest
 from .policy import sequence_stats, sequence_stats_batch
+from .process_advantages import assign_process_advantages, decision_advantage, process_reward_settings
 from .runtime_memory import activation_offload_context, memory_settings, use_activation_offload
 
 
@@ -42,6 +43,7 @@ def _group_signature(group):
     return digest([{
         "sample_id": row.sample_id, "memory_id": row.memory_id, "seed": row.seed,
         "policy_version": row.policy_version, "advantage": row.advantage,
+        **({"process_attribution": row.process_attribution} if row.process_attribution else {}),
         "decisions": [{"prompt_ids": step.completion.prompt_ids,
                        "token_ids": step.completion.token_ids,
                        "old_logprobs": step.completion.old_logprobs,
@@ -91,6 +93,7 @@ class DAPOUpdater:
 
     def __init__(self, policy, optimizer, config, runtime_memory=None):
         self.policy, self.optimizer, self.config = policy, optimizer, config
+        self.process_settings = process_reward_settings(config)
         self.runtime_memory = memory_settings() if runtime_memory is None else runtime_memory
         self.group_size = config.get("group_size", 8)
         if type(self.group_size) is not int or self.group_size < 2:
@@ -152,8 +155,10 @@ class DAPOUpdater:
                         raise ValueError("Non-finite behavior logprobs")
             if not valid_training_tokens(group, self.overlong_filter):
                 raise ValueError("DAPO group has no unmasked training tokens")
-            if not any(row.advantage != 0 for row in group
-                       if not (self.overlong_filter and trajectory_truncated(row))):
+            assign_process_advantages(group, self.config)
+            if not self.process_settings["enabled"] and not any(
+                    row.advantage != 0 for row in group
+                    if not (self.overlong_filter and trajectory_truncated(row))):
                 raise ValueError("DAPO group has no unmasked advantage signal; filter it before updating")
             signatures.append(_group_signature(group))
         self._signatures, self._cursor = signatures, consumed_groups
@@ -177,6 +182,8 @@ class DAPOUpdater:
         import torch
         if self._signatures is None or self._cursor >= len(self._signatures):
             raise ValueError("Call begin_batch before consuming a DAPO group")
+        if process_reward_settings(self.config) != self.process_settings:
+            raise ValueError("Process advantage configuration changed during a frozen DAPO batch")
         if len(groups) != self.mini_batch_groups or self._cursor + len(groups) > len(self._signatures):
             raise ValueError("update_groups requires exactly mini_batch_groups remaining complete groups")
         if self.policy.policy_version != self.behavior_version + self._cursor // self.mini_batch_groups:
@@ -187,6 +194,47 @@ class DAPOUpdater:
         group = [row for query_group in groups for row in query_group]
         rows = [row for row in group if not (self.overlong_filter and trajectory_truncated(row))]
         token_count = valid_training_tokens(rows, False)
+        process_metrics = {}
+        if self.process_settings["enabled"]:
+            read_entries = [entry for row in rows for entry in row.process_attribution["per_decision"]
+                            if entry["is_read"]]
+            count = len(read_entries)
+            training_groups = [[row for row in query_group
+                                if not (self.overlong_filter and trajectory_truncated(row))]
+                               for query_group in groups]
+            process_metrics = {
+                "process_read_steps": count,
+                **{f"process_{name}_mean": sum(entry[key] for entry in read_entries) / (count or 1)
+                   for name, key in (("gain", "g"), ("weight", "w"), ("reward", "reward"),
+                                     ("normalized_reward", "normalized_reward"),
+                                     ("return", "process_return"), ("advantage", "advantage"))},
+                "process_positive_advantage_rate": sum(entry["advantage"] > 0 for entry in read_entries) / (count or 1),
+                "process_zero_terminal_groups": sum(all(row.advantage == 0 for row in query_group)
+                                                    for query_group in training_groups),
+                "process_zero_combined_advantage_groups": sum(
+                    all(entry["advantage"] == 0 for row in query_group
+                        for entry in row.process_attribution["per_decision"])
+                    for query_group in training_groups),
+            }
+            if process_metrics["process_zero_combined_advantage_groups"] == len(groups):
+                # Adam momentum and weight decay can move weights even with a
+                # zero policy gradient. Consume this batch without touching the
+                # optimizer. Process training samples one fresh mini per batch;
+                # rejecting a wider frozen batch preserves its version/cursor
+                # checkpoint contract instead of silently counting a fake step.
+                if self._cursor != 0 or len(self._signatures) != self.mini_batch_groups:
+                    raise ValueError("A zero-advantage process mini-batch must be the entire behavior batch; "
+                                     "set target_groups_per_batch = mini_batch_groups")
+                self._cursor += len(groups)
+                report = {"optimizer_step_skipped": True, "skip_reason": "zero_combined_advantage",
+                          "loss": 0.0, "grad_norm": 0.0, "training_tokens": 0,
+                          "eligible_training_tokens": token_count, "update_groups": len(groups),
+                          "update_rollouts": len(group), "masked_rollouts": len(group) - len(rows),
+                          **process_metrics}
+                print(canonical({"event": "dapo_update_skipped", "batch_id": self.batch_id,
+                                 "behavior_policy_version": self.behavior_version,
+                                 "policy_version": self.policy.policy_version, **report}), flush=True)
+                return report
         lengths = [len(step.completion.prompt_ids) + len(step.completion.token_ids) - 1
                    for row in rows for step in row.decisions]
         batches = _micro_batches(rows, self.micro_batch_rollouts, self.max_micro_batch_tokens)
@@ -234,9 +282,10 @@ class DAPOUpdater:
                                 self.policy.device, pad_token_id=pad_token_id if pad_token_id is not None else 0,
                                 entropy_chunk_size=self.config.get("entropy_chunk_size", 32))
                         losses, olds = [], []
-                        for (i, _, value), (new, _) in zip(block, stats):
+                        for (i, j, value), (new, _) in zip(block, stats):
                             old = torch.tensor(value.old_logprobs, dtype=new.dtype, device=new.device)
-                            losses.append(clipped_loss(new, old, rows[i].advantage,
+                            advantage = decision_advantage(rows[i], j, enabled=self.process_settings["enabled"])
+                            losses.append(clipped_loss(new, old, advantage,
                                                        self.clip_low, self.clip_high).sum() / token_count)
                             olds.append(old)
                         scaled = losses[0] if len(losses) == 1 else torch.stack(losses).sum()
@@ -272,11 +321,11 @@ class DAPOUpdater:
         self._cursor += len(groups)
         peaks = {f"gpu_{device}_peak_{kind}_gib": getattr(torch.cuda, f"max_memory_{kind}")(device) / 2**30
                  for device in devices for kind in ("allocated", "reserved")}
-        return {"loss": total_loss, "entropy": total_entropy / token_count,
+        return {"optimizer_step_skipped": False, "loss": total_loss, "entropy": total_entropy / token_count,
                 "sampled_surprisal": total_surprisal / token_count,
                 "behavior_sampled_surprisal": total_behavior_surprisal / token_count,
                 "behavior_approx_kl": total_kl / token_count, "clip_fraction": total_clipped / token_count,
                 "grad_norm": float(norm), "max_old_logprob_error": max_logprob_error,
                 "training_tokens": token_count, "masked_rollouts": len(group) - len(rows),
                 "activation_offload_decisions": offloaded, "max_update_input_tokens": max(lengths),
-                **batch_report, **peaks}
+                **batch_report, **peaks, **process_metrics}

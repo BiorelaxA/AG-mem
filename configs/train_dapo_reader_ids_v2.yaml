@@ -1,0 +1,8 @@
+extends: train_dapo_parallel_v2.yaml
+# Explicit successful-read IDs and their bound evidence in every Reader state.
+reader:
+  prompt_version: evidence_ids_v2
+training:
+  # Validate after each 16-group batch with mini_batch_groups=1.
+  validation_every: 16
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_micro2_parallel4_reader_ids_v2/train

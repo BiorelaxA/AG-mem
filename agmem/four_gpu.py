@@ -1,9 +1,11 @@
-"""Run two single-GPU 27B services and a two-GPU Reader in an existing allocation.
+"""Run a two-GPU Reader with fixed 27B services in an existing allocation.
 
 From the repository root: python -u -m agmem.four_gpu [--check-only | --resume]
+Use --train-only for three GPUs: two for Reader, one for Task/Judge/process scoring.
+The default four-GPU mode also builds background directories on a separate Writer.
 No Slurm allocation is requested here. CUDA_VISIBLE_DEVICES remains authoritative.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 import argparse
@@ -23,22 +25,28 @@ from .pipeline import dataset_configs, validate_directories
 from .store import Store
 
 
-def gpu_roles(visible):
+def gpu_roles(visible, train_only=False):
     ids = [part.strip() for part in visible.split(",")]
-    if len(ids) != 4 or any(not part for part in ids) or len(set(ids)) != 4:
+    count = 3 if train_only else 4
+    name = "three" if train_only else "four"
+    if len(ids) != count or any(not part for part in ids) or len(set(ids)) != count:
         raise ValueError(
-            f"Expected four comma-separated GPU IDs in CUDA_VISIBLE_DEVICES; got {visible!r}. "
-            "Run in an srun step of your existing four-GPU job "
-            "(--overlap --nodes=1 --ntasks=1 --gres=gpu:4 --pty bash). "
+            f"Expected {name} comma-separated GPU IDs in CUDA_VISIBLE_DEVICES; got {visible!r}. "
+            f"Run in an srun step of your existing {name}-GPU job "
+            f"(--overlap --nodes=1 --ntasks=1 --gres=gpu:{count} --pty bash). "
             "nvidia-smi visibility alone does not establish the job's CUDA device mapping."
         )
+    if train_only:
+        return {"reader": ",".join(ids[:2]), "task": ids[2]}
     return {"writer": ids[0], "reader": ",".join(ids[1:3]), "task": ids[3]}
 
 
-def configs(train_path="configs/train_dapo_locomo_s_v2.yaml"):
+def configs(train_path="configs/train_dapo_reader_loop_v3_query9010_format05.yaml", train_only=False):
     train = load_config(train_path)
-    build = load_config("configs/build_others_4x80gb.yaml")
-    for config in (train, build):
+    if train["data"].get("directory_protocol") == "hierarchical_v1" and not train_only:
+        raise ValueError("Use --train-only for frozen hierarchical training; directory construction is separate")
+    build = None if train_only else load_config("configs/build_others_4x80gb.yaml")
+    for config in ([train] if train_only else [train, build]):
         for key in ("input_root", "prepared_root"):
             config["data"][key] = str(Path(config["data"][key]).resolve())
         for key, value in config["models"].items():
@@ -46,7 +54,7 @@ def configs(train_path="configs/train_dapo_locomo_s_v2.yaml"):
         for key in ("test_prepared_root", "legacy_prepared_root"):
             config["jobs"][key] = str(Path(config["jobs"][key]).resolve())
         config["training"]["output_dir"] = str(Path(config["training"]["output_dir"]).resolve())
-    if set(train["data"]["sources"]) & set(build["data"]["sources"]):
+    if build is not None and set(train["data"]["sources"]) & set(build["data"]["sources"]):
         raise ValueError("Training sources must not overlap background directory sources")
     return train, build
 
@@ -58,6 +66,20 @@ def check_inputs(train):
         for name in set(index["weight_map"].values()):
             if not (root / name).is_file():
                 raise ValueError(f"Missing model shard: {root / name}")
+    if train["data"].get("directory_protocol") == "hierarchical_v1":
+        from .pipeline import open_prepared
+        store = open_prepared(train)
+        try:
+            validate_directories(train, store, ["train", "validation"])
+            return {source: {
+                **{split: sum(e.source == source for e in task_examples(train, store, split))
+                   for split in ("train", "validation")},
+                "directory_version": store.get_metadata("directory_version"),
+                "directory_protocol": "hierarchical_v1",
+                "original_writer": store.snapshot["construction_identity"].get("writer"),
+            } for source in train["data"]["sources"]}
+        finally:
+            store.close()
     report = {}
     raw = Path(train["data"]["input_root"])
     manifest = json.loads((raw / "manifest.json").read_text())
@@ -88,6 +110,29 @@ def check_inputs(train):
     return report
 
 
+@contextmanager
+def training_locks(train):
+    """Acquire each canonical lock once, using the strongest required mode.
+
+    A frozen prepared store and training output can be siblings. In that case
+    their parent .job.lock is identical: separate shared/exclusive flock calls
+    on separate file descriptors would conflict even within this process.
+    """
+    prepared = Path(train["data"]["prepared_root"])
+    requested = [(prepared.parent / ".job.lock", True),
+                 (Path(train["training"]["output_dir"]).parent / ".job.lock", False)]
+    requested.extend((prepared / ".locks" / f"{source}.lock", False)
+                     for source in sorted(train["data"]["sources"]))
+    modes = {}
+    for path, shared in requested:
+        path = path.resolve()
+        modes[path] = modes.get(path, True) and shared
+    with ExitStack() as stack:
+        for path, shared in modes.items():
+            stack.enter_context(file_lock(path, shared=shared))
+        yield
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -97,12 +142,15 @@ def free_port():
 def server_limits(name, config):
     """Reserve workspace for full-vocabulary prompt logprobs on the Task GPU."""
     likelihood_mode = config.get("reward", {}).get("likelihood", {}).get("mode", "off")
-    if name == "task" and likelihood_mode in {"diagnostic", "reward"}:
+    process_scoring = config.get("training", {}).get("process_reward", {}).get("enabled", False)
+    if name == "task" and (likelihood_mode in {"diagnostic", "reward"} or process_scoring):
         # vLLM 0.22.1 materializes FP32 log_softmax for every prefill token,
         # even with prompt_logprobs=0. Qwen3.5's 248320-token vocabulary needs
         # 3.79 GiB for 4096 tokens, on top of logits, weights and the KV cache.
         # Chunking at 1024 lowers that tensor to 0.95 GiB; a smaller KV budget
         # and one active request leave headroom without shortening the context.
+        # Stepwise process attribution also uses prompt logprobs, independently
+        # of the optional trajectory-level likelihood diagnostic/reward.
         return {"max_num_seqs": 1, "max_num_batched_tokens": 1024,
                 "gpu_memory_utilization": 0.80}
     return {"max_num_seqs": 2, "max_num_batched_tokens": 4096,
@@ -163,10 +211,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true", help="Check cached training inputs without using GPUs")
     parser.add_argument("--resume", action="store_true", help="Resume the latest committed Reader checkpoint")
-    parser.add_argument("--train-config", default="configs/train_dapo_locomo_s_v2.yaml")
+    parser.add_argument("--train-only", action="store_true",
+                        help="Use three GPUs for Reader and Task/Judge; reuse static directories without a Writer")
+    parser.add_argument("--train-config", default="configs/train_dapo_reader_loop_v3_query9010_format05.yaml")
     parser.add_argument("--max-updates", type=int, help="Stop after this many optimizer updates and save a checkpoint")
     args = parser.parse_args()
-    train, build = configs(args.train_config)
+    train, build = configs(args.train_config, train_only=args.train_only)
     if args.max_updates is not None and args.max_updates < 1:
         parser.error("--max-updates must be positive")
     if args.check_only:
@@ -174,17 +224,14 @@ def main():
         return
     if not os.environ.get("SLURM_JOB_ID"):
         raise RuntimeError("Run inside your allocated Slurm GPU job")
-    roles = gpu_roles(os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    roles = gpu_roles(os.environ.get("CUDA_VISIBLE_DEVICES", ""), train_only=args.train_only)
     processes = []
     def interrupted(signum, frame):
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     with ExitStack() as stack:
-        stack.enter_context(file_lock(Path(train["data"]["prepared_root"]).parent / ".job.lock", shared=True))
-        stack.enter_context(file_lock(Path(train["training"]["output_dir"]).parent / ".job.lock"))
-        for source in sorted(train["data"]["sources"]):
-            stack.enter_context(file_lock(Path(train["data"]["prepared_root"]) / ".locks" / f"{source}.lock"))
+        stack.enter_context(training_locks(train))
         report = check_inputs(train)
         destination = Path(train["training"]["output_dir"])
         checkpoint = latest_checkpoint(destination) if args.resume else None
@@ -193,7 +240,7 @@ def main():
         if not args.resume and destination.exists() and any(destination.iterdir()):
             raise ValueError("Training output already exists; use --resume or a new output_dir")
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        job = Path("runs/four_gpu") / f"{os.environ['SLURM_JOB_ID']}-{stamp}"
+        job = Path("runs/three_gpu" if args.train_only else "runs/four_gpu") / f"{os.environ['SLURM_JOB_ID']}-{stamp}"
         job.mkdir(parents=True)
         print(f"Logs: {job.resolve()}; GPU allocation: {roles}", flush=True)
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false",
@@ -210,9 +257,11 @@ def main():
             processes.append(process)
             return process
         try:
+            gpu_count = 3 if args.train_only else 4
             check = start("cuda_preflight", [sys.executable, "-c", "import torch; import vllm._C; "
-                          "assert torch.cuda.device_count()==4; "
-                          "[(torch.ones((32,32),device=f'cuda:{i}') @ torch.ones((32,32),device=f'cuda:{i}')).sum().item() for i in range(4)]; "
+                          f"assert torch.cuda.device_count()=={gpu_count}; "
+                          "[(torch.ones((32,32),device=f'cuda:{i}') @ torch.ones((32,32),device=f'cuda:{i}')).sum().item() "
+                          f"for i in range({gpu_count})]; "
                           "print(torch.__version__, torch.version.cuda, 'CUDA kernels OK')"], os.environ["CUDA_VISIBLE_DEVICES"])
             if check.wait() != 0:
                 raise RuntimeError(f"CUDA/vLLM preflight failed: {job / 'cuda_preflight.log'}; fix the environment before training")
@@ -226,7 +275,8 @@ def main():
             import yaml
             servers = {}
             # Load sequentially to avoid two simultaneous 27B host-memory peaks.
-            for name, config in (("task", train), ("writer", build)):
+            server_configs = [("task", train)] if args.train_only else [("task", train), ("writer", build)]
+            for name, config in server_configs:
                 port = free_port()
                 limits = server_limits(name, config)
                 atomic_json(job / f"{name}_server_limits.json", limits)
@@ -254,10 +304,15 @@ def main():
                 train_cmd += ["--max-groups", str(args.max_updates)]
             workers = {
                 "task": start("train", train_cmd, roles["reader"], {"AGMEM_READER_MODEL_PARALLEL_SIZE": "2", "OMP_NUM_THREADS": "8"}),
-                "writer": start("directories", [sys.executable, "-u", "-m", "agmem.jobs", "directories",
-                    "--config", str(job / "writer_config.yaml"), "--job-dir", str(job)], roles["writer"]),
             }
-            print("Training and background directory construction started; validation/checkpoint every 25 steps.", flush=True)
+            if not args.train_only:
+                workers["writer"] = start("directories", [sys.executable, "-u", "-m", "agmem.jobs", "directories",
+                    "--config", str(job / "writer_config.yaml"), "--job-dir", str(job)], roles["writer"])
+            activity = "Training with static directories" if args.train_only else "Training and background directory construction"
+            print(f"{activity} started; "
+                  f"validation_every={train['training']['validation_every']}, "
+                  f"checkpoint_every={train['training']['checkpoint_every']} optimizer steps "
+                  "(0 disables the periodic trigger); checkpoints are also saved after validation.", flush=True)
             while workers:
                 for name, worker in list(workers.items()):
                     status = worker.poll()

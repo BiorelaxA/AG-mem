@@ -17,8 +17,15 @@ def committed_checkpoints(run_dir):
 def validation_scores(report):
     # Equal weight per dataset, irrespective of its number of validation queries.
     macro = report["source_macro"]
+    primary = report.get("primary_outcome_metric")
+    if primary is not None and primary not in {"answer_f1", "outcome_f1", "judge_accuracy"}:
+        raise ValueError("Unknown primary_outcome_metric for checkpoint selection")
+    if primary is None:
+        primary = "judge_accuracy" if macro.get("judge_accuracy") is not None else "outcome_f1"
     scores = {"best_reward": macro["reward"],
-              "best_outcome": macro["judge_accuracy"] if "judge_accuracy" in macro else macro["outcome_f1"]}
+              "best_outcome": macro[primary]}
+    if report.get("primary_outcome_metric") is not None:
+        scores["best_primary"] = macro[primary]
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
            for v in scores.values()):
         raise ValueError("Checkpoint selection requires finite validation scores")
@@ -62,8 +69,11 @@ def retain_checkpoints(run_dir, keep_last):
     return best
 
 
-def best_checkpoint(run_dir, kind="best_reward"):
-    if kind not in {"best_reward", "best_outcome"}:
+def best_checkpoint(run_dir, kind=None):
+    if kind not in {None, "best_reward", "best_outcome", "best_primary"}:
         raise ValueError(f"Unknown checkpoint selection: {kind}")
-    selected = select_best_checkpoints(run_dir).get(kind)
+    best = select_best_checkpoints(run_dir)
+    if kind is None:
+        kind = "best_primary" if "best_primary" in best else "best_reward"
+    selected = best.get(kind)
     return Path(run_dir) / selected["checkpoint"] if selected else None

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 
 from .core import CapacityError, Decision, Trajectory, digest
-from .prompts import reader_messages, task_messages
+from .prompts import (reader_messages, task_messages, validate_reader_prompt_version,
+                      validate_task_prompt_version)
 
 
 def parse_action(text: str) -> dict:
@@ -23,7 +25,9 @@ def parse_action(text: str) -> dict:
 
 
 class MemoryEnvironment:
-    def __init__(self, store, directory_version: str, max_ids=4, max_calls=8, capacity=None, id_protocol="strict_v1"):
+    def __init__(self, store, directory_version: str, max_ids=4, max_calls=8, capacity=None,
+                 id_protocol="strict_v1", *, prompt_version="legacy_v1",
+                 task_prompt_version="legacy_v1"):
         if type(max_ids) is not int or max_ids < 1:
             raise ValueError("max_ids must be a positive integer")
         self.store, self.version = store, directory_version
@@ -31,9 +35,27 @@ class MemoryEnvironment:
         if id_protocol not in {"strict_v1", "repair_v2", "strict_v2"}:
             raise ValueError("Unknown retrieval.id_protocol")
         self.id_protocol = id_protocol
+        self.prompt_version = validate_reader_prompt_version(prompt_version)
+        self.task_prompt_version = validate_task_prompt_version(task_prompt_version)
+        if self.prompt_version in {"interaction_history_v4", "interaction_history_v5"} and self.id_protocol != "strict_v2":
+            raise ValueError(f"{self.prompt_version} requires the strict_v2 retrieval protocol")
+
+    def _reader_messages(self, example, directory, evidence, trajectory, error=None):
+        settings = {}
+        if self.prompt_version in {"interaction_history_v4", "interaction_history_v5"}:
+            # At a generation boundary these are only completed prior steps.
+            # At capacity preflight the caller first finalizes the current tool
+            # result, making this exactly the proposed next Reader state.
+            settings["interaction_history"] = [
+                {"reader_output": step.completion.text, "action": deepcopy(step.action),
+                 "tool_result": deepcopy(step.tool_result)} for step in trajectory.decisions]
+        return reader_messages(example, directory, evidence, error, max_ids=self.max_ids,
+                               id_protocol=self.id_protocol, prompt_version=self.prompt_version,
+                               max_calls=self.max_calls, read_calls_used=trajectory.n_read_calls,
+                               **settings)
 
     def run(self, example, policy, seed: int, policy_version=0):
-        episode = self._episode(example, seed, policy_version)
+        episode = self.start_episode(example, seed, policy_version)
         messages, decision_seed = next(episode)
         while True:
             try:
@@ -47,7 +69,7 @@ class MemoryEnvironment:
 
     def run_batch(self, example, policy, seeds, policy_version=0, max_batch_tokens=16384):
         """Advance independent retrieval states together; tools remain ordered per rollout."""
-        episodes = [self._episode(example, seed, policy_version) for seed in seeds]
+        episodes = [self.start_episode(example, seed, policy_version) for seed in seeds]
         active = {index: next(episode) for index, episode in enumerate(episodes)}
         results = [None] * len(seeds)
         while active:
@@ -68,6 +90,15 @@ class MemoryEnvironment:
                     del active[index]
         return results
 
+    def start_episode(self, example, seed: int, policy_version=0):
+        """Create an independent retrieval state, advanced only by its caller.
+
+        The generator yields (messages, decision_seed) and accepts a Completion;
+        its return value is the finished Trajectory. Store/cache access stays on
+        the thread advancing the generator, including cross-query batching.
+        """
+        return self._episode(example, seed, policy_version)
+
     def _episode(self, example, seed, policy_version):
         directory = self.store.directory(example.memory_id, self.version)
         entries = {row["id"]: row for row in directory}
@@ -78,7 +109,7 @@ class MemoryEnvironment:
         evidence, error = {}, None
         previous_invalid = None
         for decision_index in range(self.max_calls + 1):
-            messages = reader_messages(example, directory, list(evidence.values()), error, max_ids=self.max_ids, id_protocol=self.id_protocol)
+            messages = self._reader_messages(example, directory, list(evidence.values()), trajectory, error)
             completion = yield messages, seed + decision_index
             decision = Decision(messages, completion, state_sha256=digest(messages))
             trajectory.decisions.append(decision)
@@ -130,7 +161,11 @@ class MemoryEnvironment:
                     candidate = {**evidence, **{row["id"]: row for row in records}}
                     try:
                         if self.capacity:
-                            self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids, id_protocol=self.id_protocol), task_messages(example, list(candidate.values())))
+                            self.capacity(reader_messages(example, directory, list(candidate.values()),
+                                                          max_ids=self.max_ids, id_protocol=self.id_protocol,
+                                                          prompt_version=self.prompt_version, max_calls=self.max_calls,
+                                                          read_calls_used=trajectory.n_read_calls),
+                                          task_messages(example, list(candidate.values()), self.task_prompt_version))
                     except CapacityError:
                         capacity_error = True
                         records = []
@@ -183,7 +218,11 @@ class MemoryEnvironment:
                 candidate = {**evidence, **{row["id"]: row for row in records}}
                 try:
                     if self.capacity:
-                        self.capacity(reader_messages(example, directory, list(candidate.values()), max_ids=self.max_ids, id_protocol=self.id_protocol), task_messages(example, list(candidate.values())))
+                        self.capacity(reader_messages(example, directory, list(candidate.values()),
+                                                      max_ids=self.max_ids, id_protocol=self.id_protocol,
+                                                      prompt_version=self.prompt_version, max_calls=self.max_calls,
+                                                      read_calls_used=trajectory.n_read_calls),
+                                      task_messages(example, list(candidate.values()), self.task_prompt_version))
                 except CapacityError:
                     code = "context_capacity_exceeded"
             if code is not None:
@@ -232,6 +271,7 @@ class MemoryEnvironment:
             result["ids_truncated"] = True
 
         code = None
+        staged_evidence = None
         if trajectory.n_read_calls >= self.max_calls:
             violations.append("read_budget_exceeded")
             code = "max_read_calls"
@@ -248,18 +288,28 @@ class MemoryEnvironment:
                                | {"content": entries[key]["content"]})
             if records:
                 candidate = {**evidence, **{row["id"]: row for row in records}}
-                try:
-                    if self.capacity:
-                        self.capacity(reader_messages(example, directory, list(candidate.values()),
-                                                      max_ids=self.max_ids, id_protocol=self.id_protocol),
-                                      task_messages(example, list(candidate.values())))
-                except CapacityError:
-                    code = "context_capacity_exceeded"
-                else:
-                    evidence.update({row["id"]: row for row in records})
+                if self.prompt_version in {"interaction_history_v4", "interaction_history_v5"}:
+                    # Complete the tool feedback before checking capacity: the
+                    # next input includes this action/result as well as evidence.
+                    staged_evidence = candidate
                     result["records"] = records
                     result["new_ids"] = [row["id"] for row in records]
                     result["no_new_evidence"] = False
+                else:
+                    try:
+                        if self.capacity:
+                            self.capacity(reader_messages(example, directory, list(candidate.values()),
+                                                          max_ids=self.max_ids, id_protocol=self.id_protocol,
+                                                          prompt_version=self.prompt_version, max_calls=self.max_calls,
+                                                          read_calls_used=trajectory.n_read_calls),
+                                          task_messages(example, list(candidate.values()), self.task_prompt_version))
+                    except CapacityError:
+                        code = "context_capacity_exceeded"
+                    else:
+                        evidence.update({row["id"]: row for row in records})
+                        result["records"] = records
+                        result["new_ids"] = [row["id"] for row in records]
+                        result["no_new_evidence"] = False
 
         if code is None and violations:
             codes = {"empty_ids": "invalid_batch_size", "too_many_ids": "too_many_ids",
@@ -268,22 +318,48 @@ class MemoryEnvironment:
             code = codes[violations[0]]
         result["read_calls_used"] = trajectory.n_read_calls
         result["read_calls_remaining"] = max(0, self.max_calls - trajectory.n_read_calls)
+        error = self._strict_feedback(result, violations, code)
+        if self.prompt_version in {"interaction_history_v4", "interaction_history_v5"} and result["read_call_consumed"]:
+            candidate = staged_evidence if staged_evidence is not None else evidence
+            try:
+                if self.capacity:
+                    self.capacity(self._reader_messages(example, directory, list(candidate.values()),
+                                                        trajectory, error),
+                                  task_messages(example, list(candidate.values()), self.task_prompt_version))
+            except CapacityError:
+                # Roll back only the proposed evidence; the attempted READ and
+                # its capacity failure remain visible in the interaction history.
+                result.update(records=[], new_ids=[], no_new_evidence=True)
+                error = self._strict_feedback(result, violations, "context_capacity_exceeded")
+                self.capacity(self._reader_messages(example, directory, list(evidence.values()),
+                                                    trajectory, error),
+                              task_messages(example, list(evidence.values()), self.task_prompt_version))
+                # If even the failure-state history cannot fit, propagate the
+                # infrastructure error instead of scoring a truncated rollout.
+            else:
+                if staged_evidence is not None:
+                    evidence.update(staged_evidence)
+        return error
+
+    @staticmethod
+    def _strict_feedback(result, violations, code):
+        result["ok"] = code is None
+        result.pop("error", None)
         if code is None:
-            result["ok"] = True
             return None
         # This feedback changes the next Reader state even when the attempted
         # read adds no records. Partial successes and all violations stay auditable.
-        error = {"code": code, "requested_ids": requested, "invalid_ids": invalid,
-                 "already_read_ids": already_read, "new_ids": result["new_ids"],
+        error = {"code": code, "requested_ids": result["requested_ids"], "invalid_ids": result["invalid_ids"],
+                 "already_read_ids": result["already_read_ids"], "new_ids": result["new_ids"],
                  "no_new_evidence": result["no_new_evidence"],
                  "read_call_consumed": result["read_call_consumed"],
                  "read_calls_used": result["read_calls_used"],
                  "read_calls_remaining": result["read_calls_remaining"],
                  "format_violations": list(violations)}
-        if already_read:
+        if result["already_read_ids"]:
             error["message"] = ("The already_read_ids are already in retrieved_evidence; reuse that evidence. "
                                 "Request unread directory IDs only when needed, or stop.")
-        elif invalid:
+        elif result["invalid_ids"]:
             error["message"] = "Copy IDs exactly from the current directory, including leading zeros and hashes."
         result["error"] = error
         return error

@@ -1,0 +1,41 @@
+extends: train_dapo_reader_loop_v3_query9010_format05.yaml
+
+# Static directories and raw session texts are reused from the prepared data.
+# Only Reader parameters are updated; Writer, Task Agent and Judge remain fixed.
+jobs:
+  experiment_name: locomo_dapo_directory_process_v2
+reader:
+  prompt_version: interaction_history_v5
+retrieval:
+  max_ids_per_call: 2
+  max_read_calls: 8
+  id_protocol: strict_v2
+task_agent:
+  prompt_version: history_answer_evidence_v2
+  max_output_tokens: 2048
+reward:
+  formula: judge_cost_v2
+  read_call_cost: 0.01
+  format_penalty_mode: per_id
+  format_penalty: 0.5
+training:
+  algorithm: dapo
+  epochs: 3
+  # Save after validation and at normal completion; disable an extra periodic save.
+  validation_every: 4
+  checkpoint_every: 0
+  group_size: 8
+  mini_batch_groups: 8
+  # One frozen sampling batch supplies one optimizer update, followed by resampling.
+  target_groups: 8
+  # Process rewards can distinguish actions even when terminal rewards are tied.
+  filter_metric: exclude_all_wrong
+  process_reward:
+    enabled: true
+    alpha: 1.0
+    gamma: 1.0
+    # Match method.png initially; rms is available as an explicit alternative.
+    normalization: group_standardize
+    weight_min: 0.5
+    weight_max: 2.0
+  output_dir: runs/locomo_longmemeval/experiments/locomo_dapo_directory_process_v2/train

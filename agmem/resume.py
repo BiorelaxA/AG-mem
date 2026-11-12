@@ -12,10 +12,17 @@ def validate_resume_config(previous, current, *, fork_retrieval=False, fork_id_p
     keys = ["reader", "retrieval", "reward", "training"]
     if current.get("training", {}).get("algorithm") == "dapo":
         keys += ["seed", "data", "models", "writer", "memory", "task_agent"]
+        from .execution import sampling_protocol
+        if sampling_protocol(previous) != sampling_protocol(current):
+            raise ValueError("Resume configuration changed: sampling protocol; use a new experiment")
     if fork_retrieval or fork_id_protocol:
         keys += ["seed", "data", "models", "writer", "memory"]
     for key in keys:
         old, new = previous[key], current[key]
+        if key == "reader":
+            # Older experiments predate explicit Reader prompt versioning.
+            old = {"prompt_version": "legacy_v1", **old}
+            new = {"prompt_version": "legacy_v1", **new}
         # Evaluation cadence does not change training updates or the data cursor.
         ignored = {"tensorboard", "validation_every"} if key == "training" else set()
         if (fork_retrieval or fork_id_protocol) and key == "training":
@@ -31,6 +38,26 @@ def validate_resume_config(previous, current, *, fork_retrieval=False, fork_id_p
             raise ValueError(f"Resume configuration changed: {key}")
 
 
+def validate_reader_input_contract(previous, current_config, *, fork_retrieval=False, fork_id_protocol=False):
+    """Keep stored rollout prompts compatible with the next sampling batch."""
+    from .prompts import configured_reader_input_contract
+    expected = configured_reader_input_contract(previous["config"])
+    recorded = previous.get("reader_input_contract")
+    if recorded is None:
+        if expected["prompt_version"] != "legacy_v1":
+            raise ValueError("Missing reader_input_contract provenance for versioned Reader prompt")
+        recorded = expected
+    if recorded != expected:
+        raise ValueError("Resume Reader input contract differs from the recorded prompt or state schema")
+    current = configured_reader_input_contract(current_config)
+    if current["prompt_version"] != expected["prompt_version"]:
+        raise ValueError("Resume Reader prompt_version changed; start a new experiment")
+    # Existing GRPO forks explicitly allow max_ids or id_protocol to change.
+    # Their old contract is still checked against the old configuration above.
+    if not (fork_retrieval or fork_id_protocol) and recorded != current:
+        raise ValueError("Resume Reader input contract changed; start a new experiment")
+
+
 def resume_metadata(config, checkpoint, *, fork_retrieval=False, fork_id_protocol=False):
     destination = Path(config["training"]["output_dir"])
     source = Path(checkpoint).resolve().parent
@@ -42,4 +69,5 @@ def resume_metadata(config, checkpoint, *, fork_retrieval=False, fork_id_protoco
         path = destination / "run.json"
     previous = json.loads(path.read_text())
     validate_resume_config(previous["config"], config, fork_retrieval=fork_retrieval, fork_id_protocol=fork_id_protocol)
+    validate_reader_input_contract(previous, config, fork_retrieval=fork_retrieval, fork_id_protocol=fork_id_protocol)
     return previous

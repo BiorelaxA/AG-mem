@@ -49,7 +49,7 @@ class JudgeTests(unittest.TestCase):
         example.judge_metadata = {"question_type": kind, "question_id": qid}
         return example
 
-    def test_refined_payload_is_original_template_and_cached(self):
+    def test_refined_payload_uses_configured_template_and_is_cached(self):
         judge, requests = self.scorer(['{"label": "CORRECT"}'])
         self.assertEqual(judge.score(self.example, "In May 2023."), 1.0)
         self.assertEqual(judge.score(self.example, "In May 2023."), 1.0)
@@ -134,6 +134,22 @@ class JudgeTests(unittest.TestCase):
         self.assertNotEqual(first.cache_scope, second.cache_scope)
         self.assertNotEqual(first.cache_scope, third.cache_scope)
         self.assertEqual(first.provenance()["parser"], "strict_binary_v1")
+
+    def test_changed_template_does_not_reuse_previous_judge_result(self):
+        legacy_template = "Legacy Judge: {question}\nGold: {gold_answer}\nAnswer: {generated_answer}"
+        prediction = "Last month relative to 19 June 2023 (May 2023)"
+        with patch("agmem.judges.LOCOMO_REFINED", legacy_template):
+            previous, previous_requests = self.scorer(['{"label":"WRONG"}'])
+            self.assertEqual(previous.score(self.example, prediction), 0)
+        current, current_requests = self.scorer(['{"label":"CORRECT"}'])
+        self.assertEqual(current.score(self.example, prediction), 1)
+        self.assertEqual(current.score(self.example, prediction), 1)
+        self.assertEqual([len(previous_requests), len(current_requests)], [1, 1])
+        self.assertNotEqual(previous.cache_scope, current.cache_scope)
+        self.assertNotEqual(previous.provenance()["template_sha256"]["locomo_refined"],
+                            current.provenance()["template_sha256"]["locomo_refined"])
+        self.assertEqual(current_requests[0]["messages"][0]["content"], LOCOMO_REFINED.format(
+            question=self.example.query, gold_answer="May 2023", generated_answer=prediction))
 
     def test_judge_metadata_and_gold_do_not_enter_agent_messages(self):
         example = self.longmemeval("knowledge-update", "SECRET_ABSTENTION_abs")

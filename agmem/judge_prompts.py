@@ -1,9 +1,10 @@
-"""Frozen benchmark Judge templates, fetched on 2026-10-27.
+"""Benchmark-derived Judge templates, originally fetched on 2026-10-27.
 
-The prompt text below is copied unchanged; only Python constant names and
-dispatch are local. Reproducibility uses the recorded content SHA256 rather
-than a moving upstream branch. Reader, Writer and Task Agent prompts live in
-prompts.py and are deliberately independent of this module.
+The LoCoMo template locally adapts time equivalence and additional-answer
+handling to the Task Agent's answer contract (2026-11-04). LongMemEval text
+is unchanged. Reproducibility uses the recorded content SHA256 rather than
+a moving upstream branch. Reader, Writer and Task Agent prompts live in
+prompts.py.
 
 LoCoMo Refined attribution notice:
 This benchmark is a modified version of the LoCoMo release from Snap Research:
@@ -16,7 +17,7 @@ The reproduced Refined prompt is licensed under Creative Commons
 Attribution-NonCommercial 4.0 International (CC BY-NC 4.0):
 https://creativecommons.org/licenses/by-nc/4.0/
 https://github.com/mem-eval-suite/LoCoMo_refined/blob/main/LICENSE.txt
-This copy preserves the Refined prompt and adapts only the runtime/dispatch;
+This copy adapts the Refined prompt's time and additional-answer rules;
 using it on this project's LoCoMo data does not turn that data into Refined.
 
 LongMemEval templates: MIT License, Copyright (c) 2024 Di Wu.
@@ -42,20 +43,25 @@ LOCOMO_REFINED = """Your task is to label an answer as ’CORRECT’ or ’WRONG
 (2) a gold (ground truth) answer,
 (3) a generated answer.
 Core principle — Inclusion + Non-contradiction
-- Be GENEROUS: if the generated answer clearly includes the gold’s key content (or a clear paraphrase of the same content) and does not contradict it, mark CORRECT — even if extra details are added.
-- Mark WRONG only when the generated answer does not include the gold’s content, changes it, or contradicts it.
-TIME (strict granularity; relative form equivalence; no calendar math)
-- Granularity must match exactly: HOUR↔HOUR, DAY↔DAY, MONTH↔MONTH, YEAR↔YEAR.
-  Do not answer a gold at a different time unit — even if the numeric value overlaps. Do not answer a month-level gold with a specific day, nor a year with a specific month/day/hour, etc.
-  (e.g., gold = "July 26, 2019" [DAY]; generated = "2019-07-26 08:09:17" [includes Second] → WRONG)
-- Do NOT convert relative ↔ absolute. If the gold uses a relative time expression, the generated answer must also use a relative form (or a clear paraphrase of that same form), not a computed date/range.
-- Treat harmless modifiers in relative forms (e.g., “the/last/previous/just prior”) as equivalent when both the anchor date and the time unit are the same.
-- Lists of DISTINCT facts:
+- Judge semantic coverage of the gold answer, not exact wording, fact order, answer length or the number of list items.
+- Be GENEROUS: if the generated answer clearly includes the gold’s key content (or a clear paraphrase of the same content) and does not contradict it, mark CORRECT. Ignore additional details, reasons and list items that do not contradict the gold.
+- Mark WRONG only when required gold content is missing, its meaning is changed, or the generated answer contradicts it. Additional information alone is not a reason to mark WRONG.
+TIME (semantic equivalence; aligned with Task Agent time answers)
+- Accept an absolute date, an equivalent relative expression, or both together when they refer to the same event time. The Task Agent is asked to provide both forms when the evidence supports them; this must not itself cause a WRONG label.
+- Allow calendar arithmetic when an explicit, unambiguous anchor is available in the question, gold answer or generated answer. Anchor expressions inside a historical session to that session's stated date. For questions asking how many days/weeks/months ago, use the stated current date. Never invent a missing anchor or use the computer's current date.
+- Compare the event time with the gold at the precision required by the question. Do not require identical surface granularity or reject a matching answer merely because it also contains a compatible date, date range, timestamp or explanatory anchor. A clearly identified session/anchor date is not a competing event date.
+- Preserve uncertainty: do not replace "last week" or "a few days before" with an unsupported exact day. Accept an equivalent date range when the stated anchor determines it. Reject conflicting event dates, incorrect conversions, or an exact date that replaces an unresolved interval.
+- When relative and absolute forms are both given, they must be mutually consistent. Treat equivalent date formats, punctuation and harmless wording differences as equivalent.
+    - Example: gold = "July 2023"; generated = "Last month relative to 19 August 2023 (July 2023)" → CORRECT.
+    - Example: gold = "yesterday, relative to 25 May 2023"; generated = "24 May 2023 (yesterday relative to 25 May 2023)" → CORRECT.
+    - Example: gold = "a few days before 24 May 2023"; generated = "24 May 2023 (a few days before 24 May 2023)" → WRONG because the event dates conflict.
+Lists of DISTINCT facts:
 - If the gold answer lists multiple distinct facts (joined by "and", commas, or slashes), the generated answer must cover **all** of them.
-- Extra non-contradictory items **generally count as WRONG**.
+- Ignore extra non-contradictory items; the generated list does not have to match the gold list exactly.
     - Example: gold = A, B, C ; gen = A, B, C → CORRECT
-    - Example: gold = A, B, C ; gen = A, B, C, D → WRONG
-- Exception: If a gold element is elaborated or split into finer details in the generated answer (e.g., C → C, C′), it is still considered CORRECT.
+    - Example: gold = A, B, C ; gen = A, B, C, D → CORRECT when D does not contradict the gold.
+    - Example: gold = A, B, C ; gen = A, B, D → WRONG because C is missing.
+- A gold element may be paraphrased, elaborated or split into finer details (e.g., C → C, C′) without penalty.
 Preference/Benefit Questions (e.g., "what X likes/values most")
 - If gold lists multiple reasons/aspects, the generated answer only needs to include **any one** of them without contradiction to be CORRECT.
 
@@ -98,6 +104,7 @@ UPSTREAM = {
     "locomo_refined": {
         "url": "https://github.com/mem-eval-suite/LoCoMo_refined/blob/main/src/llm_judge.py",
         "license": "CC-BY-NC-4.0", "retrieved": "2026-10-27",
+        "local_adaptation": "task_aligned_time_and_gold_inclusion_v1",
     },
     "longmemeval_official": {
         "url": "https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py",

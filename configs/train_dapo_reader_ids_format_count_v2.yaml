@@ -1,0 +1,7 @@
+extends: train_dapo_reader_ids_v2.yaml
+# Count each bad Reader decision once, accumulating across the whole rollout.
+reward:
+  format_penalty_mode: per_decision
+  format_penalty: 0.1
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_micro2_parallel4_reader_ids_v2_format_count/train

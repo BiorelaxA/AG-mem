@@ -1,7 +1,10 @@
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
+from threading import Barrier, Lock
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -120,6 +123,50 @@ class LikelihoodTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(result["delta"], 0.0)
         self.assertEqual(result["d"], 0.0)
+
+    def test_workers_serialize_tokenizer_but_overlap_http_and_share_baseline(self):
+        class NonReentrantTokenizer(ScoringTokenizer):
+            def __init__(self):
+                super().__init__()
+                self.encoding = Lock()
+
+            def guarded_encode(self, function, *args, **kwargs):
+                if not self.encoding.acquire(blocking=False):
+                    raise AssertionError("Concurrent access to shared tokenizer")
+                try:
+                    # Stand in for an encoder that releases the GIL while its
+                    # mutable backend is borrowed by this scoring worker.
+                    time.sleep(0.01)
+                    return function(*args, **kwargs)
+                finally:
+                    self.encoding.release()
+
+            def apply_chat_template(self, *args, **kwargs):
+                return self.guarded_encode(super().apply_chat_template, *args, **kwargs)
+
+            def encode(self, *args, **kwargs):
+                return self.guarded_encode(super().encode, *args, **kwargs)
+
+        self.tokenizer = NonReentrantTokenizer()
+        http_overlap = Barrier(2, timeout=5)
+        start = Barrier(2, timeout=5)
+        def respond(request):
+            prompt = json.loads(request.content)["prompt"]
+            if 71 in prompt or 72 in prompt:
+                # Both different evidence requests must reach HTTP together.
+                # Holding the tokenizer lock over scoring would deadlock here.
+                http_overlap.wait()
+            return httpx.Response(200, json=scoring_response(request))
+        scorer, requests = self.scorer(handler=respond)
+        scorer.tokenizer_factory = Mock(return_value=self.tokenizer)
+        def score(marker):
+            start.wait()
+            return scorer.score(self.example, [{"marker": marker}])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(score, [1, 2]))
+        scorer.tokenizer_factory.assert_called_once_with()
+        self.assertEqual([row["delta"] for row in results], [3.0, 2.0])
+        self.assertEqual(len(requests), 3)  # Two contexts and one shared baseline.
 
     def test_complete_gold_alternatives_are_averaged_after_token_normalization(self):
         self.example.gold_answers = ["alpha beta", "gamma"]

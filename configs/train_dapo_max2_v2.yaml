@@ -1,0 +1,6 @@
+extends: train_dapo_reader_ids_format_count_v2.yaml
+# One limit drives Reader instructions, executed ID prefixes and format scoring.
+retrieval:
+  max_ids_per_call: 2
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_micro2_parallel4_reader_ids_v2_format_count_max2/train

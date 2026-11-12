@@ -10,11 +10,20 @@ from .dapo_sampling import DynamicGroupSampler, validate_dapo_config
 
 
 def run_training_loop(config, store, policy, optimizer, updater, env, agent, scorer,
-                      examples, run_dir, writer=None, *, state=None, max_groups=None):
+                      examples, run_dir, writer=None, *, state=None, max_groups=None, process_scorer=None):
     """Keep optimizer steps separate from candidates, generation rounds and batches."""
     from .monitoring import write_train_metrics, write_validation_metrics, write_sampling_metrics
     from .pipeline import announce, collect_group, evaluate_with_policy, metrics, save_checkpoint
     from .traces import compact_group, save_training_group
+    from .execution import execution_settings
+    from .process_advantages import decision_advantage, process_reward_settings
+    from .dapo import trajectory_truncated
+    from .process_rewards import process_metrics
+
+    process_enabled = process_reward_settings(config["training"])["enabled"]
+    if process_enabled and process_scorer is None:
+        raise ValueError("Enabled process training requires a frozen attribution scorer")
+    examples_by_id = {example.sample_id: example for example in examples}
 
     state = state or {"step": 0, "dapo_state": {"sampler": {}, "active": None}}
     step, completed = state["step"], 0
@@ -39,6 +48,8 @@ def run_training_loop(config, store, policy, optimizer, updater, env, agent, sco
     sampler = DynamicGroupSampler(config, examples, **dapo_state["sampler"])
     active = dapo_state.get("active")
     groups = [[trajectory_from_dict(row) for row in group] for group in active["groups"]] if active else None
+    parallel_sampling = execution_settings(config)["sampling_group_concurrency"] > 1
+    pipeline_progress = {}
     if max_groups is not None and max_groups < 1:
         raise ValueError("max_groups must be positive (counts actual optimizer updates)")
 
@@ -53,16 +64,31 @@ def run_training_loop(config, store, policy, optimizer, updater, env, agent, sco
         return save_checkpoint(config, policy, optimizer, run_dir, step, sampler.epoch, sampler.next_index,
                                validation=validation, dapo_state=checkpoint_state())
 
+    def record_failure(example, candidate_index, attempt, exc):
+        append_json(run_dir / "infrastructure_failures.jsonl", {
+            "sample_id": example.sample_id, "candidate_id": candidate_index, "step": step,
+            "attempt": attempt, "error": str(exc)})
+
     def collect(example, candidate_index):
         for attempt in range(config["training"].get("group_infrastructure_retries", 1) + 1):
             try:
                 return collect_group(config, env, policy, agent, example, candidate_index, scorer=scorer)
             except InfrastructureError as exc:
-                append_json(run_dir / "infrastructure_failures.jsonl", {
-                    "sample_id": example.sample_id, "candidate_id": candidate_index, "step": step,
-                    "attempt": attempt, "error": str(exc)})
+                record_failure(example, candidate_index, attempt, exc)
                 if attempt == config["training"].get("group_infrastructure_retries", 1):
                     raise
+
+    def pipeline_window(report):
+        pipeline_progress.clear()
+        pipeline_progress.update(report)
+        announce("dapo_sampling_pipeline", step=step, behavior_policy_version=policy.policy_version,
+                 progress=report)
+
+    def collect_candidates(candidates):
+        from .rollout_pipeline import collect_candidate_groups
+        pipeline_progress.clear()
+        return collect_candidate_groups(config, env, policy, agent, scorer, candidates,
+                                        on_failure=record_failure, on_progress=pipeline_window)
 
     def candidate(group, report):
         append_json(run_dir / "candidate_metrics.jsonl", report)
@@ -76,6 +102,11 @@ def run_training_loop(config, store, policy, optimizer, updater, env, agent, sco
 
     def sampling_round(report):
         report = {**report, "step": step, "candidate_index": sampler.candidate_index}
+        if parallel_sampling:
+            # Window counters are cumulative within this generation round,
+            # whereas ordinary sampling metrics cover the full refill batch.
+            report.update({f"pipeline_round_{key}": value for key, value in pipeline_progress.items()
+                           if isinstance(value, (int, float))})
         append_json(run_dir / "sampling_metrics.jsonl", report)
         announce("dapo_sampling", **report)
         if writer:
@@ -85,15 +116,25 @@ def run_training_loop(config, store, policy, optimizer, updater, env, agent, sco
         if active is None:
             started = time.monotonic()
             groups, sampling = sampler.collect(collect, policy.policy_version,
-                                                record_candidate=candidate, record_round=sampling_round)
+                                                record_candidate=candidate, record_round=sampling_round,
+                                                collect_candidates=collect_candidates if parallel_sampling else None)
             if not groups:
                 announce("dapo_dataset_exhausted", **sampling)
-                if step == 0:
+                if step == 0 and not counters.get("skipped_zero_signal_batches", 0):
                     raise RuntimeError("No complete DAPO batch was collected; inspect candidate_metrics.jsonl")
                 break
+            if process_scorer is not None:
+                attribution_started = time.monotonic()
+                announce("process_attribution_started", step=step, groups=len(groups),
+                         behavior_policy_version=policy.policy_version)
+                for query_group in groups:
+                    process_scorer.score_group(examples_by_id[query_group[0].sample_id], query_group, policy,
+                        on_progress=lambda progress: announce("process_attribution_progress", step=step, **progress))
             active = {"batch_id": sampling["batch_id"], "behavior_version": policy.policy_version,
                       "consumed_groups": 0, "sampling": sampling,
-                      "sampling_seconds": time.monotonic() - started}
+                      "sampling_seconds": time.monotonic() - started,
+                      **({"process_scoring_seconds": time.monotonic() - attribution_started}
+                         if process_scorer is not None else {})}
         updater.begin_batch(groups, active["batch_id"], consumed_groups=active["consumed_groups"],
                             behavior_version=active["behavior_version"])
         while updater.consumed_groups < len(groups):
@@ -102,15 +143,42 @@ def run_training_loop(config, store, policy, optimizer, updater, env, agent, sco
             started = time.monotonic()
             # File indices remain optimizer-step indices for checkpoint recovery.
             # Each rollout retains its sample_id and its own query's advantage.
-            save_training_group(run_dir, step,
+            has_signal = any(decision_advantage(row, index, enabled=process_enabled) != 0
+                for row in group
+                if not (config["training"].get("overlong_filter", True) and trajectory_truncated(row))
+                for index in range(len(row.decisions)))
+            trace_root = run_dir if has_signal else run_dir / "zero_signal_batches" / active["batch_id"]
+            save_training_group(trace_root, step,
                                 f"{active['batch_id']}/{group[0].sample_id}/update-{step + 1}", env.version, group)
             update = updater.update(group) if mini == 1 else updater.update_groups(update_groups)
+            if update.get("optimizer_step_skipped", False):
+                # These groups passed the correctness filter. If even the
+                # combined step advantages vanish, preserve their audit but do
+                # not apply Adam momentum or count a fictitious optimizer step.
+                counters["skipped_zero_signal_batches"] = counters.get("skipped_zero_signal_batches", 0) + 1
+                counters["zero_signal_groups"] = counters.get("zero_signal_groups", 0) + len(update_groups)
+                skipped = {**update, "step": step, "batch_id": active["batch_id"],
+                           "skip_index": counters["skipped_zero_signal_batches"],
+                           "candidate_index": sampler.candidate_index,
+                           "policy_version": policy.policy_version,
+                           "sample_ids": [rows[0].sample_id for rows in update_groups],
+                           "trace_root": str(trace_root), "elapsed_seconds": time.monotonic() - started}
+                append_json(run_dir / "skipped_updates.jsonl", skipped)
+                announce("dapo_zero_signal_batch", **skipped)
+                if writer:
+                    writer.add_scalar("sampling/skipped_zero_signal_batches",
+                                      counters["skipped_zero_signal_batches"], sampler.candidate_index)
+                    writer.flush()
+                continue
             step += 1
             completed += 1
             counters["trained_groups"] += len(update_groups)
             counters["update_rollouts"] += len(group)
             counters["training_tokens"] += update["training_tokens"]
-            report = {**metrics(group)["pooled"], **update, "step": step, "epoch": sampler.epoch,
+            report = {**metrics(group)["pooled"], **update,
+                      **process_metrics(group, overlong_filter=config["training"].get("overlong_filter", True)),
+                      **({"process_scoring_seconds": active["process_scoring_seconds"]}
+                         if "process_scoring_seconds" in active else {}), "step": step, "epoch": sampler.epoch,
                       "sample_id": group[0].sample_id, "sample_ids": [rows[0].sample_id for rows in update_groups],
                       "policy_version": policy.policy_version,
                       "behavior_policy_version": active["behavior_version"], "batch_id": active["batch_id"],
@@ -161,9 +229,9 @@ def train_dapo(config, max_groups=None, resume=None, *, validate_before_training
     from .pipeline import (announce, directory_version, make_environment,
                            make_reward_scorer, make_task_agent, open_prepared, validate_directories)
     from .policy import HFPolicy, load_model, load_tokenizer, model_fingerprint
-    from .prompts import task_input_contract
-    from .resume import resume_metadata, validate_resume_config
-    from .execution import execution_settings
+    from .prompts import configured_reader_input_contract, task_input_contract
+    from .resume import resume_metadata, validate_reader_input_contract, validate_resume_config
+    from .execution import execution_settings, sampling_protocol
 
     if not torch.cuda.is_available() and config["reader"]["device"].startswith("cuda"):
         raise RuntimeError("DAPO training requires the allocated GPUs")
@@ -173,34 +241,56 @@ def train_dapo(config, max_groups=None, resume=None, *, validate_before_training
     previous = resume_metadata(config, resume) if resume else None
     run_dir.mkdir(parents=True, exist_ok=True)
     store, writer, scorer, agent = open_prepared(config), None, None, None
+    process_scorer = None
     try:
         splits = ["train", "validation"] if config["training"]["validation_every"] else ["train"]
         validate_directories(config, store, splits)
         examples = task_examples(config, store, "train")
         validation_examples = task_examples(config, store, "validation") if "validation" in splits else []
         scorer = make_reward_scorer(config, store)
+        from .process_rewards import make_process_scorer
+        process_scorer = make_process_scorer(config, store)
         # Validate rubric metadata before loading the large Reader.
-        for example in examples + validation_examples:
-            scorer.judge.validate_example(example)
+        if scorer.judge is not None:
+            for example in examples + validation_examples:
+                scorer.judge.validate_example(example)
         runtime_memory = memory_settings()
         implementation = "agmem_dapo_v2" if config["reward"]["formula"] == "judge_cost_v2" else "agmem_dapo_v1"
+        if config["reward"]["formula"] == "f1_cost_v1":
+            implementation = "agmem_dapo_hierarchical_f1_v1"
+        if process_scorer is not None:
+            implementation = "agmem_dapo_process_v1"
         metadata = {"config": config, "algorithm": "dapo", "implementation": implementation,
+                    "sampling_protocol": sampling_protocol(config),
                     "reader": model_fingerprint(config["models"]["reader_path"]),
                     "task": model_fingerprint(config["models"]["task_path"]),
                     "directory_version": directory_version(store),
                     "directory_service_identity": store.get_metadata("directory_service_identity"),
                     "prepare_identity": store.get_metadata("prepare_identity"),
-                    "task_input_contract": task_input_contract(), "scoring_protocol": scorer.provenance(),
+                    "task_input_contract": task_input_contract(config.get("task_agent", {}).get("prompt_version", "legacy_v1")),
+                    "scoring_protocol": scorer.provenance(),
+                    "reader_input_contract": configured_reader_input_contract(config),
                     "runtime_memory": runtime_memory, "parameterization": "full",
                     "optimizer": "CPUAdamW_fp32_master_and_moments"}
+        if config["data"].get("directory_protocol") == "hierarchical_v1":
+            metadata["directory_service_identity"] = store.snapshot["construction_identity"].get("writer")
+            metadata["directory_construction_identity"] = store.snapshot["construction_identity"]
+        if process_scorer is not None:
+            metadata["process_scoring_protocol"] = process_scorer.provenance()
         state = None
         if previous:
+            previous_protocol = previous.get("sampling_protocol", sampling_protocol(previous["config"]))
+            if previous_protocol != metadata["sampling_protocol"]:
+                raise ValueError("DAPO resume provenance mismatch: sampling_protocol")
             for key in ("algorithm", "implementation", "reader", "task", "directory_version", "prepare_identity",
                         "task_input_contract", "scoring_protocol"):
                 if previous.get(key) != metadata[key]:
                     raise ValueError(f"DAPO resume provenance mismatch: {key}")
+            if previous.get("process_scoring_protocol") != metadata.get("process_scoring_protocol"):
+                raise ValueError("DAPO resume provenance mismatch: process_scoring_protocol")
             state = torch.load(Path(resume) / "trainer.pt", map_location="cpu", weights_only=True)
             validate_resume_config(state["config"], config)
+            validate_reader_input_contract(state, config)
             if "dapo_state" not in state:
                 raise ValueError("A GRPO checkpoint cannot resume a DAPO experiment")
         model_path = str(Path(resume) / "model") if resume else config["models"]["reader_path"]
@@ -232,12 +322,14 @@ def train_dapo(config, max_groups=None, resume=None, *, validate_before_training
             announce("tensorboard_started", log_dir=str(log_dir), next_step=next_step,
                      entropy="Full-vocabulary entropy in nats, completion-token mean before each optimizer update")
         run_training_loop(config, store, policy, optimizer, updater, env, agent, scorer, examples,
-                          run_dir, writer, state=state, max_groups=max_groups)
+                          run_dir, writer, state=state, max_groups=max_groups, process_scorer=process_scorer)
     finally:
         if writer:
             writer.close()
         if scorer:
             scorer.close()
+        if process_scorer:
+            process_scorer.close()
         if agent:
             agent.service.client.close()
         store.close()

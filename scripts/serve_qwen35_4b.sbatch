@@ -4,9 +4,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:3
 #SBATCH --mem=120G
-#SBATCH --time=5-00:00:00
+#SBATCH --time=32:00:00
 #SBATCH --no-requeue
 #SBATCH --output=agmem-4b-serve-%j.out
 #SBATCH --error=agmem-4b-serve-%j.err
