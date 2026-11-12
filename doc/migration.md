@@ -2,6 +2,8 @@
 
 更新日期：2026-11-12。当前迁移范围是：代码通过 GitHub，所有新旧数据、目录、轨迹和日志通过 Hugging Face；checkpoint20/32 通过 rsync 单独完整传输，其他 checkpoint 不迁移；基础模型在新服务器重新下载，环境重新安装。过时方案的非checkpoint代码与数据同样保留。本文下面的旧迁移说明仅作历史参考，不是本次执行入口。
 
+文件转移到目标服务器后，按 [新服务器迁移验收清单](migration_destination_checklist.md) 逐项核对；清单包含实际文件名、检查命令、通过标准，以及源端尚未生成而允许缺失的产物。
+
 ## 迁移范围与实际体积
 
 逐文件清单位于 `reports/migration_20261112/payload_sizes.json`。整个项目约 1.2TB，其中主要体积是自训练 checkpoint，并不是数据：
