@@ -1,5 +1,4 @@
 """Required mixed flat snapshots are checked in place and never rebuilt."""
-from copy import deepcopy
 from pathlib import Path
 import json
 import tempfile
@@ -90,22 +89,67 @@ class ExistingDirectoryTests(unittest.TestCase):
 
 
 class RequiredCheckpointTests(unittest.TestCase):
-    def test_expected_step_run_and_shard_coverage(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            path = root / 'checkpoint-00000020'
-            (path / 'model').mkdir(parents=True)
-            (path / 'trainer.pt').write_bytes(b'fixture')
-            atomic_json(path / 'model/config.json', {})
-            (path / 'model/model-1.safetensors').write_bytes(b'fixture')
-            suite = {'training_run': str(root), 'checkpoints': {'best': path.name}, 'checkpoint_steps': {'best': 20}}
-            self.assertEqual(checkpoint_model(suite, 'best'), path / 'model')
-            bad = deepcopy(suite); bad['checkpoint_steps']['best'] = 32
-            with self.assertRaisesRegex(ValueError, 'required training run/step'):
-                checkpoint_model(bad, 'best')
-            atomic_json(path / 'model/model.safetensors.index.json', {'weight_map': {'a': 'model-2.safetensors'}})
-            with self.assertRaisesRegex(ValueError, 'weight shards'):
-                checkpoint_model(suite, 'best')
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name) / 'run'
+        self.suite = {'training_run': str(self.root), 'checkpoints': {}, 'checkpoint_steps': {}}
+        for label, step in [('best', 20), ('final', 32)]:
+            checkpoint = self.root / f'checkpoint-{step:08d}'
+            atomic_json(checkpoint / 'model/config.json', {})
+            (checkpoint / 'model/model-1.safetensors').write_bytes(b'fixture')
+            self.suite['checkpoints'][label] = checkpoint.name
+            self.suite['checkpoint_steps'][label] = step
+        self.model = self.root / self.suite['checkpoints']['best'] / 'model'
+
+    def test_inference_checkpoints_need_no_trainer_state(self):
+        for label in ['best', 'final']:
+            checkpoint = self.root / self.suite['checkpoints'][label]
+            with self.subTest(label=label):
+                self.assertFalse((checkpoint / 'trainer.pt').exists())
+                self.assertEqual(checkpoint_model(self.suite, label), checkpoint / 'model')
+                self.suite['checkpoints'][label] = str(checkpoint)
+                self.assertEqual(checkpoint_model(self.suite, label), checkpoint / 'model')
+                self.assertFalse((checkpoint / 'trainer.pt').exists())
+
+    def test_wrong_or_invalid_expected_step_is_rejected(self):
+        for step in [32, -1, True, '20']:
+            with self.subTest(step=step):
+                self.suite['checkpoint_steps']['best'] = step
+                with self.assertRaisesRegex(ValueError, 'required training run/step'):
+                    checkpoint_model(self.suite, 'best')
+
+    def test_checkpoint_outside_selected_training_run_is_rejected(self):
+        self.suite['checkpoints']['best'] = str(self.model.parent)
+        self.suite['training_run'] = str(self.root.parent / 'other-run')
+        with self.assertRaisesRegex(ValueError, 'required training run/step'):
+            checkpoint_model(self.suite, 'best')
+
+    def test_missing_model_config_is_rejected(self):
+        (self.model / 'config.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing checkpoint model'):
+            checkpoint_model(self.suite, 'best')
+
+    def test_missing_or_empty_model_weights_are_rejected(self):
+        weights = self.model / 'model-1.safetensors'
+        weights.unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing checkpoint model'):
+            checkpoint_model(self.suite, 'best')
+        weights.touch()
+        with self.assertRaisesRegex(ValueError, 'Missing checkpoint model'):
+            checkpoint_model(self.suite, 'best')
+
+    def test_indexed_model_requires_all_nonempty_shards(self):
+        atomic_json(self.model / 'model.safetensors.index.json', {
+            'weight_map': {'a': 'model-1.safetensors', 'b': 'model-2.safetensors'}})
+        with self.assertRaisesRegex(ValueError, 'weight shards'):
+            checkpoint_model(self.suite, 'best')
+        shard = self.model / 'model-2.safetensors'
+        shard.touch()
+        with self.assertRaisesRegex(ValueError, 'Missing checkpoint model'):
+            checkpoint_model(self.suite, 'best')
+        shard.write_bytes(b'fixture')
+        self.assertEqual(checkpoint_model(self.suite, 'best'), self.model)
 
 
 if __name__ == '__main__':

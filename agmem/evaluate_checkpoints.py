@@ -143,6 +143,7 @@ def load_suite(path):
 
 
 def checkpoint_model(suite, label):
+    """Validate an inference checkpoint; optimizer/trainer state is not required."""
     checkpoint = Path(suite["checkpoints"][label])
     if not checkpoint.is_absolute():
         checkpoint = Path(suite["training_run"]) / checkpoint
@@ -151,8 +152,7 @@ def checkpoint_model(suite, label):
     if expected_step is not None:
         if (type(expected_step) is not int or expected_step < 0
                 or checkpoint.name != f"checkpoint-{expected_step:08d}"
-                or checkpoint.parent != Path(suite["training_run"]).resolve()
-                or not (checkpoint / "trainer.pt").is_file()):
+                or checkpoint.parent != Path(suite["training_run"]).resolve()):
             raise ValueError(f"Checkpoint does not match the required training run/step: {label}")
     model = checkpoint / "model"
     weights = list(model.glob("*.safetensors"))

@@ -1,6 +1,8 @@
 # 新服务器迁移方案与会话交接
 
-更新日期：2026-11-12。当前迁移范围是：代码通过 GitHub，所有新旧数据、目录、轨迹和日志通过 Hugging Face；checkpoint20/32 通过 rsync 单独完整传输，其他 checkpoint 不迁移；基础模型在新服务器重新下载，环境重新安装。过时方案的非checkpoint代码与数据同样保留。本文下面的旧迁移说明仅作历史参考，不是本次执行入口。
+更新日期：2026-11-13。当前迁移范围是：代码通过 GitHub，所有新旧数据、目录、轨迹和日志通过 Hugging Face；checkpoint20/32 仅用于评测和推理，通过 rsync 传输 `model/` 和验证指标，排除 `trainer.pt`，其他 checkpoint 不迁移；基础模型在新服务器重新下载，环境重新安装。过时方案的非checkpoint代码与数据同样保留。本文下面的旧迁移说明仅作历史参考，不是本次执行入口。
+
+数据已由用户上传到 `hongyshen/agmem-migration-20261112`，固定 revision 为 `d2b143382fc8332935e9e7a159f9fdba4a53d050`。本次缩减 checkpoint 迁移范围不改变 HF 数据包，无需重新打包或上传。新服务器必须同步本次评测代码修改，才能接受没有 `trainer.pt` 的推理 checkpoint；训练恢复仍要求完整训练状态。
 
 文件转移到目标服务器后，按 [新服务器迁移验收清单](migration_destination_checklist.md) 逐项核对；清单包含实际文件名、检查命令、通过标准，以及源端尚未生成而允许缺失的产物。
 
@@ -11,15 +13,15 @@
 | 类别 | 当前统计 | 迁移处理 |
 |---|---:|---|
 | 原始及处理后数据、所有 prepared、旧单层及父子目录、缓存、轨迹、评测、日志、代码 | 约 28.42GiB | 全部保留，代码进 GitHub，数据包进 HF |
-| checkpoint 配置及其他元数据 | 约 0.39GiB | 仅20/32随完整checkpoint传输，旧checkpoint不迁移 |
-| 21 个 `trainer.pt` | 约 1013.37GiB | 仅20/32随完整checkpoint传输 |
-| 21 个 safetensors 权重文件 | 约 177.56GiB | 仅20/32随完整checkpoint传输 |
+| checkpoint 配置及其他元数据 | 约 0.39GiB | 仅20/32的tokenizer、配置、验证指标随权重传输 |
+| 21 个 `trainer.pt` | 约 1013.37GiB | 全部不传输；源端保留 |
+| 21 个 safetensors 权重文件 | 约 177.56GiB | 仅20/32的权重传输 |
 | 项目外 `/share/home/wtma/model/` 基础模型 | 不打包 | 新服务器重新下载 |
 | Conda 环境目录 | 不打包 | 新服务器重新安装，版本清单保留 |
 
-用户已明确仅迁移checkpoint20/32，两套完整目录约113.44GiB，包含model、trainer.pt、配置及验证指标；旧checkpoint不打包、不传输，也不在源端删除。排除checkpoint后的非模型数据约28GiB，实际包清单以打包时扫描为准；上表其余部分还包括走GitHub的代码和.git。统计是本次只读扫描的快照，不代表后续运行不会新增文件。
+用户已明确checkpoint20/32只用于评测和推理，不再恢复训练。两套 `model/` 加验证指标合计约16.95GiB，其中权重16.91GiB；排除的两个 `trainer.pt` 合计约96.49GiB。原完整目录113.44GiB只是源端占用，不再是传输目标。所有源端checkpoint仍保留。排除checkpoint后的非模型数据约28GiB，实际包清单以打包时扫描为准；上表其余部分还包括走GitHub的代码和.git。
 
-打包脚本生产只读预览已通过：14,689个文件、30,256,696,723字节（约28.18GiB），排除21个checkpoint目录。7项小样本测试通过，包括真实分片/解压、SHA校验及纳秒mtime保留；尚未生成生产数据包。
+本次数据包包含14,689个文件、30,256,696,723字节（约28.18GiB），排除21个checkpoint目录；压缩流共3个分片、9,756,988,048字节（约9.09GiB）。用户提供的上传日志显示全部文件已提交到上方HF revision。7项打包小样本测试已通过，包括真实分片/解压、SHA校验及纳秒mtime保留；新服务器仍须检查下载文件完整性。
 
 ## GitHub 保存代码
 
@@ -27,9 +29,9 @@
 
 代码快照包含 `agmem/`、全部 `configs/`（本机凭证配置单独处理）、`scripts/`、`tests/`、`doc/`、README、依赖声明、`.gitignore`、`.gitattributes`、`method.png` 等设计文件。上传前检查 `git status --short` 和 `git diff --cached --stat`，确认目录 prompt 的资源文件及新脚本已加入。实验数据、SQLite、权重和完整会话记录不进入代码提交。不要直接使用未经核对的 `git add .` 把日志或本机凭证一起提交。
 
-建议创建独立迁移分支/标签，并在数据包清单中记录最终 commit SHA。新服务器按该 SHA 检出，保证数据包与代码版本对应。当前尚未 commit 或 push 本次迁移内容。
+迁移代码使用分支 `migration-20261112`，用户已上传此前版本。本次推理checkpoint兼容修改和文档仍需另行提交、推送，并在新服务器拉取；数据包记录的旧commit作为打包时来源保留，不修改归档来匹配后续代码补丁。
 
-源服务器执行（迁移分支首次创建；若已存在则切换到该分支）：
+以下为初次代码迁移记录；已完成时不需要重新创建分支。本次补丁只提交实际修改的评测代码、测试与迁移文档。
 
 ```bash
 cd /share/home/wtma/AG-mem
@@ -53,7 +55,7 @@ git rev-parse HEAD
 - `data/` 全部版本，包括早期划分、LoCoMo 9:1、LongMemEval 8:1:1 的 Parquet、manifest、row mapping。
 - `runs/` 全部实验：单层目录、父子目录、prepared、构建断点库、embedding 缓存、rollout、validation、TensorBoard、评测答案、离线 GPT 请求/回答、失败运行及日志。
 - `reports/` 全部审计与分析结果，以及根目录 `.out`、`.err`、`.log` 等实验记录。
-- 数据包排除所有数字编号的 `checkpoint-*` 目录及其 `.building` 临时目录；仅20/32通过rsync完整复制。checkpoint外的 `run.json`、训练轨迹、评测指标和日志仍完整打包。
+- 数据包排除所有数字编号的 `checkpoint-*` 目录及其 `.building` 临时目录；仅20/32的推理文件通过rsync单独复制，不包含 `trainer.pt`。checkpoint外的 `run.json`、训练轨迹、评测指标和日志仍完整打包。
 
 脚本 `scripts/package_migration_data.py` 保留全部原相对路径，输出结构为：
 
@@ -74,7 +76,7 @@ agmem-migration-20261112/
 
 GPU 节点不能联网时，在 GPU 节点完成停写/打包，通过共享盘让可联网登录节点上传；若共享盘配额不足，使用足够空间的本地临时盘并通过内网拷到登录节点。`/tmp` 不是跨节点共享位置，也不作为唯一长期副本。
 
-可以在独立的上传工具环境安装 `huggingface_hub`，不改训练环境。以下命令在可联网登录节点执行；使用该节点本地/tmp存包时，上传必须在同一节点完成。先停止项目的构建、训练和评测写入。目录包含新旧数据，包尚未实际生成：
+可以在独立的上传工具环境安装 `huggingface_hub`，不改训练环境。以下为已完成的初次打包/上传步骤，保留作记录；当前恢复应直接使用已上传的固定revision，无需重跑。本地/tmp不跨节点共享；如将来另做快照，先停止项目的构建、训练和评测写入，再在同一节点打包上传。
 
 ```bash
 cd /share/home/wtma/AG-mem
@@ -101,8 +103,9 @@ hf upload "$HF_REPO" "$PACK_DIR" --repo-type dataset
 
 ```bash
 hf auth login
-hf download YOUR_ACCOUNT/agmem-migration-20261112 \
-  --repo-type dataset --revision HF_COMMIT_SHA --local-dir /path/to/downloaded-packages
+hf download hongyshen/agmem-migration-20261112 \
+  --repo-type dataset --revision d2b143382fc8332935e9e7a159f9fdba4a53d050 \
+  --local-dir /path/to/downloaded-packages
 ```
 
 上传命令以安装版本的 `hf --help` 为准。官方上传说明支持大目录分批上传与重复执行续传；不要更新已经开始上传的快照包。断线续传只需重跑`hf upload`，不重建仓库或数据包。当前 HF 官方列出的免费 private 总额度为100GB，共享账户的其他仓库也占用此额度；本方案checkpoint走rsync，不占用该数据仓库。资料：[上传说明](https://huggingface.co/docs/huggingface_hub/en/guides/upload)、[存储额度](https://huggingface.co/docs/hub/storage-limits)。
@@ -110,8 +113,8 @@ hf download YOUR_ACCOUNT/agmem-migration-20261112 \
 新服务器先具备git、Python3、zstd和rsync，然后执行；项目路径尽量与旧服务器相同。`/path/to/downloaded-packages`必须在项目外。解压前检查SHA256与完成标识，连续分片不能单独解压：
 
 ```bash
-export PROJECT='/share/home/wtma/AG-mem'
-export HF_REPO='YOUR_ACCOUNT/agmem-migration-20261112'
+export PROJECT='/data/home/wtma/AG-mem'
+export HF_REPO='hongyshen/agmem-migration-20261112'
 export PACK_DIR='/path/to/downloaded-packages'
 GIT_LFS_SKIP_SMUDGE=1 git clone --branch migration-20261112 \
   https://github.com/BiorelaxA/AG-mem.git "$PROJECT"
@@ -119,7 +122,8 @@ python3 -m venv "$HOME/.venvs/agmem-transfer"
 source "$HOME/.venvs/agmem-transfer/bin/activate"
 python -m pip install -U huggingface_hub
 hf auth login
-hf download "$HF_REPO" --repo-type dataset --local-dir "$PACK_DIR"
+hf download "$HF_REPO" --repo-type dataset \
+  --revision d2b143382fc8332935e9e7a159f9fdba4a53d050 --local-dir "$PACK_DIR"
 cd "$PACK_DIR"
 test -f COMPLETE.json
 sha256sum -c SHA256SUMS
@@ -129,23 +133,35 @@ mkdir -p "$PROJECT/runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v
 mkdir -p "$HOME/.codex/sessions/2026/11/02"
 ```
 
-实际执行时任何校验/解压报错都应停止后续步骤；在脚本中使用`set -euo pipefail`确保自动停止。数据仓库应为本次固定快照；需要严格固定下载版本时追加`--revision HF_COMMIT_SHA`。
+实际执行时任何校验/解压报错都应停止后续步骤；在脚本中使用`set -euo pipefail`确保自动停止。若只下载到JSON、日志、清单，而3个 `archive.tar.zst.part-*` 缺失，数据仍未下载完整，不能解压。目标路径以新服务器实际位置为准；若真实路径为 `/mydata/home/wtma`，须相应调整命令中的项目与包目录。
 
-## checkpoint20与32单独传输
+## checkpoint20与32仅传输推理文件
 
-先在新服务器完成Git clone和数据恢复，创建相同的训练目录。以下在源项目根目录执行；将目标SSH和项目路径替换为实际值。两个源checkpoint路径末尾不加斜杠，以保留两个目录名。
+先同步本次评测代码修改，并在新服务器创建目标训练目录：
+
+```bash
+mkdir -p /data/home/wtma/AG-mem/runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+```
+
+以下在旧服务器源项目根执行；目标SSH和项目路径须符合新服务器实际位置。先通过迁移专用密钥验证SSH登录。两个源checkpoint路径末尾不加斜杠，以保留两个目录名；仅排除训练状态，模型目录内所有文件与验证指标均保留。
 
 ```bash
 cd /share/home/wtma/AG-mem
-export TARGET_SSH='USER@NEW_SERVER'
-export TARGET_PROJECT='/share/home/wtma/AG-mem'
+export TARGET_SSH='wtma@175.102.130.79'
+export TARGET_PROJECT='/data/home/wtma/AG-mem'
 export TRAIN_REL='runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train'
 rsync -aH -s --partial --modify-window=-1 --info=progress2 \
+  --exclude='trainer.pt' \
+  -e "ssh -i $HOME/.ssh/agmem_migration_ed25519 -o IdentitiesOnly=yes" \
   "$TRAIN_REL/checkpoint-00000020" "$TRAIN_REL/checkpoint-00000032" \
   "$TARGET_SSH:$TARGET_PROJECT/$TRAIN_REL/"
 ```
 
-两端rsync建议至少3.1.3，以支持纳秒mtime比较。中断后原命令重跑，源文件不会删除；不要加`--delete`。最终可将上述`-aH`改为`-aHnci`进行只读内容复核，无文件差异再继续使用。不会传输其余旧checkpoint。
+两端rsync建议至少3.1.3，以支持纳秒mtime比较。中断后重跑同一条命令即可复用已传好的文件；源文件不会删除，不加`--delete`。如果旧的完整传输命令仍在前台运行，先在对应终端按Ctrl+C，再运行新命令。
+
+`--exclude='trainer.pt'` 不会删除目标端已传过去或残留的训练状态；它们不影响推理，暂时保留即可。也不要制造空的 `trainer.pt` 占位。父级 `run.json` 来自HF数据包，仍须保留，供评测读取冻结训练配置和协议。新评测入口接受没有 `trainer.pt` 的模型目录，仍检查指定训练根、checkpoint步数、模型配置和权重；训练恢复入口仍需真实的训练状态。
+
+最终可将上述`-aH`改为`-aHnci`进行只读内容复核，保留同样的排除项和SSH参数。退出码0且没有文件差异才通过；复核的数据量约17GiB，不再读取两个48GiB的训练状态文件。
 
 ## 当前对话的迁移
 
@@ -203,7 +219,7 @@ codex resume 01a19c23-65d1-73a2-b52b-09c9b363e14e -C /new/path/AG-mem
 - 增量LME-S父子目录入口 `scripts/build_longmemeval_811_hierarchical_qwen.sh`，配置 `configs/build_adjacent_qwen_longmemeval_811_incremental.yaml`。三卡：Embedding4B一张，Qwen27B Writer两张，每Writer64并发，总128。配置已实现不代表新库已构建完成，应查看目标库实际进度。
 - 父子目录ORM配置 `configs/train_dapo_hierarchical_f1.yaml`：每次1ID、最多10次READ、最多展开2个子目录；reward=2F1-1-0.05×READ次数-0.5×format违规数。读取当前已展示子目录会format罚，读取已被淘汰的导航目录不罚format但照计cost；重复读取segment会罚。DAPO排除全F1=0组，也过滤无有效advantage组；epoch3、group_size8、mini_batch_groups8，验证每4step，主指标F1。
 - PRM相关实现保留在 `process_rewards.py`、`process_advantages.py`，方案定义见 `method.png`，不要在迁移时重写或将它混入旧ORM评测。
-- 当前迁移的明确要求：新旧代码和非checkpoint数据全部保留；基础模型和环境重新安装；GitHub代码、HF数据；仅checkpoint20/32通过rsync完整传输，旧checkpoint不迁移、不删除源文件。没有执行远端上传、Git push、数据删除或生产数据归档。
+- 当前迁移的明确要求：新旧代码和非checkpoint数据全部保留；基础模型和环境重新安装；GitHub代码、HF数据；仅checkpoint20/32的 `model/` 与验证指标通过rsync传输，不传任何 `trainer.pt`，不恢复这两个checkpoint的训练。用户已上传代码和HF数据（revision见文首）；新服务器下载和checkpoint传输仍需验收。旧checkpoint不迁移，源端文件保留。
 
 可在新会话直接发送：
 

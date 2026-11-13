@@ -4,20 +4,24 @@
 
 源端核查基线为 2026-11-12。若打包前又有新构建或评测，以实际数据包里的 `SOURCE_FILES.jsonl`、`ARCHIVE_MANIFEST.json` 和源端最新清单为准，不把本文的旧进度当作迁移后的最新进度。
 
-约定：代码来自 GitHub；全部新旧非checkpoint数据来自 HF；仅 checkpoint20/32 通过 rsync；基础模型和 Python 环境在目标端重建；会话 JSONL 单独传输。其他 checkpoint 缺失是预期行为，不应补传或据此判断失败。
+2026-11-13更新约定：代码来自 GitHub；全部新旧非checkpoint数据来自 HF；checkpoint20/32仅用于评测和推理，通过rsync迁移 `model/` 和验证指标，不传 `trainer.pt`。基础模型和 Python 环境在目标端重建；会话 JSONL 单独传输。其他checkpoint以及这两个checkpoint的训练状态缺失均是预期行为，不应补传或据此判断失败。须同步支持推理checkpoint的最新评测代码；完整续训不在本次迁移范围内。
+
+已上传的数据仓库为 `hongyshen/agmem-migration-20261112`，固定revision为 `d2b143382fc8332935e9e7a159f9fdba4a53d050`。缩减checkpoint传输不改变这个数据包。
 
 ## 1. 先确定路径与检查顺序
 
 以下命令在新服务器执行，替换为实际路径。先完成文件检查，再运行构建、训练或评测，以免程序更新日志、缓存和状态文件，影响与归档的比较。
 
 ```bash
-export PROJECT='/share/home/wtma/AG-mem'
+export PROJECT='/data/home/wtma/AG-mem'
 export PACK_DIR='/你的路径/agmem-migration-download'
 export TRAIN_REL='runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train'
 cd "$PROJECT"
 ```
 
 按顺序检查：归档校验 → 解压文件 → 代码/文档 → 数据/目录 → checkpoint → 会话 → 重建环境/模型 → 程序预检查。前六项通过说明文件迁移完整，最后两项通过才说明可以运行；二者不能互相替代。
+
+若新服务器的实际项目路径是 `/mydata/home/wtma/AG-mem`，用该路径设置 `PROJECT`，不要在两个目录中分别恢复一部分文件。
 
 ## 2. 需要首先阅读和保留的文档
 
@@ -325,15 +329,15 @@ PY
 
 所有 `runs/*/experiments`、训练目录和 `runs/evaluation/` 的非checkpoint文件都由第4节全量核对；包括 `run.json`、rollout、验证结果、TensorBoard、请求/响应和失败日志。不要只保留最终summary。
 
-## 8. 只验收checkpoint20和checkpoint32
+## 8. 只验收checkpoint20和checkpoint32的推理文件
 
-父训练根为 `$PROJECT/$TRAIN_REL`。父级 `run.json`通过HF包迁移，是旧训练配置和Reader/Judge协议的来源，不能只复制两个model目录。
+父训练根为 `$PROJECT/$TRAIN_REL`。父级 `run.json`通过HF包迁移，是旧训练配置和Reader/Judge协议的来源，仍须保留。两个checkpoint的推理文件合计约16.95GiB；不要求 `trainer.pt`。旧服务器仍保留完整训练状态，迁移不会删除它们。
 
 两个checkpoint当前均是单个safetensors文件；没有 `model.safetensors.index.json` 是正常的：
 
 | 相对各checkpoint目录的文件 | 源端基线/作用 |
 |---|---|
-| `trainer.pt` | 51,803,641,294 bytes；完整训练状态，当前评测也检查它存在 |
+| `trainer.pt` | 排除，不是推理验收项；每个源文件51,803,641,294 bytes。缺失正常，已有副本无需为推理删除 |
 | `validation_metrics.json` | 对应验证结果 |
 | `model/model.safetensors` | 9,078,624,992 bytes；训练后Reader权重 |
 | `model/config.json`、`model/generation_config.json` | 模型及生成配置 |
@@ -348,26 +352,31 @@ base = Path(os.environ['PROJECT']) / os.environ['TRAIN_REL']
 assert isinstance(json.loads((base / 'run.json').read_text()), dict)
 for step in (20, 32):
     p = base / f'checkpoint-{step:08d}'
-    assert (p / 'trainer.pt').stat().st_size == 51803641294
     assert (p / 'model/model.safetensors').stat().st_size == 9078624992
     for name in ['validation_metrics.json', 'model/config.json', 'model/generation_config.json',
                  'model/tokenizer.json', 'model/tokenizer_config.json', 'model/chat_template.jinja']:
         assert (p / name).is_file() and (p / name).stat().st_size > 0, str(p / name)
-    print('PASS', p.name)
+    print('PASS: inference files', p.name)
+    if (p / 'trainer.pt').exists():
+        print('NOTE: trainer.pt already present; optional, not required for inference')
 PY
 ```
 
-这只证明文件齐全和大小吻合。源服务器仍可访问时，使用下面的只读rsync内容复核；会读取两端约113GiB数据，但不会传输修改：
+这只证明推理文件齐全和大小吻合。源服务器仍可访问时，使用下面的只读rsync内容复核；会读取两端各约17GiB数据，不读取被排除的训练状态，也不会传输修改：
 
 ```bash
-# 在源服务器项目根执行；替换目标SSH及项目路径。
+# 在旧服务器项目根执行；核对目标SSH及项目实际路径。
+export TARGET_SSH='wtma@175.102.130.79'
+export TARGET_PROJECT='/data/home/wtma/AG-mem'
 export TRAIN_REL='runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train'
 rsync -aHnci -s --modify-window=-1 \
+  --exclude='trainer.pt' \
+  -e "ssh -i $HOME/.ssh/agmem_migration_ed25519 -o IdentitiesOnly=yes" \
   "$TRAIN_REL/checkpoint-00000020" "$TRAIN_REL/checkpoint-00000032" \
-  'USER@NEW_SERVER:/目标路径/AG-mem/runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train/'
+  "$TARGET_SSH:$TARGET_PROJECT/$TRAIN_REL/"
 ```
 
-退出码0且没有文件差异才通过。快速模型指纹另见 `environment_and_models.json` 中 `orm_checkpoint20/orm_checkpoint32`；它包含文件mtime，不是完整权重内容校验。不要用空的 `trainer.pt` 或重新下载的基础模型冒充这两个checkpoint。
+退出码0且没有文件差异才通过。快速模型指纹另见 `environment_and_models.json` 中 `orm_checkpoint20/orm_checkpoint32`；它包含文件mtime，不是完整权重内容校验。不要用重新下载的基础模型替代训练后的权重，也不要创建空的 `trainer.pt` 占位。如果评测仍因缺少 `trainer.pt` 报错，应同步最新 `agmem/evaluate_checkpoints.py`；训练恢复入口仍要求真实训练状态，不在此次推理验收范围。
 
 ## 9. 评测文件哪些必须有，哪些尚未生成
 
@@ -443,7 +452,7 @@ CUDA_VISIBLE_DEVICES='' python -u -m agmem.evaluate_checkpoints \
 - [ ] GitHub commit/HF revision/数据包SHA已记录。
 - [ ] 完成标识、全部分片、解压文件清单检查通过。
 - [ ] 所有新旧数据划分、原文、摘要、SQLite和来源清单完整。
-- [ ] 只迁移checkpoint20/32，大小及内容复核通过，父级run.json存在。
+- [ ] checkpoint20/32的model与验证指标迁移完成，大小及内容复核通过，父级run.json存在；trainer.pt允许缺失，评测代码已更新。
 - [ ] 旧未完成构建/评测状态与源端一致；未把未生成文件误判为丢失。
 - [ ] 会话文件校验通过，交接文档可读取。
 - [ ] 模型版本/路径适配和CPU预检查通过，或清楚标记“文件迁移完成，运行适配待完成”。
@@ -451,4 +460,4 @@ CUDA_VISIBLE_DEVICES='' python -u -m agmem.evaluate_checkpoints \
 
 给新服务器上的Codex可直接发送：
 
-> 请先阅读 doc/migration.md 和 doc/migration_destination_checklist.md，按数据包清单逐项检查迁移结果并报告缺失/差异。只迁移了checkpoint20和32，旧checkpoint缺失正常；保留所有旧数据与实验记录。先检查文件，再处理路径和重新下载模型的身份兼容，不自动重建目录或启动训练评测。
+> 请先阅读 doc/migration.md 和 doc/migration_destination_checklist.md，按数据包清单逐项检查迁移结果并报告缺失/差异。checkpoint20和32只迁移推理模型与验证指标，不恢复训练；trainer.pt和旧checkpoint缺失正常。保留所有旧数据与实验记录。先检查文件，再处理路径和重新下载模型的身份兼容，不自动重建目录或启动训练评测。
