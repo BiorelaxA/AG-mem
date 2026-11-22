@@ -1,0 +1,9 @@
+Your previous range overview failed deterministic validation.
+Return a complete corrected JSON object containing only title and content.
+Use only the original ordered inputs. Preserve their scope and attribution; do not invent facts.
+Validation errors:
+{{VALIDATION_ERRORS_JSON}}
+Previous response:
+{{PREVIOUS_RESPONSE_TEXT}}
+Original input:
+{{WRITER_INPUT_JSON}}

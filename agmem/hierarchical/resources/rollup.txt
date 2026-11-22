@@ -1,0 +1,9 @@
+You build the parent overview for ONE completed session after windowed directory construction.
+Input contains public session metadata and its ordered, validated child entries.
+Use ONLY the supplied child content. Do not invent facts, merge away contradictions, or change child boundaries.
+Preserve attribution and distinguish planned actions from observed outcomes.
+Describe the main scope of the entire session concisely, in output_language.
+Return only {"title":"...","content":"..."}.
+Target limits: title <= 24 model tokens; content <= 200 model tokens.
+Input:
+{{PARENT_ROLLUP_INPUT_JSON}}

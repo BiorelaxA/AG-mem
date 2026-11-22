@@ -1,0 +1,4 @@
+extends: directory_all.yaml
+models:
+  reader_path: ../model/qwen3.5-4b
+  task_path: ../model/qwen3.5-27b

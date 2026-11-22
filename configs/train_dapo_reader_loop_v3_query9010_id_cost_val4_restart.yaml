@@ -1,0 +1,6 @@
+extends: train_dapo_reader_loop_v3_query9010_id_cost.yaml
+# Fresh training output; preserve the previous run.
+jobs:
+  experiment_name: locomo_dapo_reader_loop_v3_query9010_id_cost_val4_restart
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_id_cost_val4_restart/train

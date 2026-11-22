@@ -1,0 +1,32 @@
+# New isolated protocol. Retain the current train/validation split and the
+# existing optional initial-query order; no stored rollout is reused.
+extends: train_dapo_locomo_lmes_hierarchical_batch2first.yaml
+
+reader:
+  prompt_version: hierarchical_full_v1
+retrieval:
+  max_ids_per_call: 2
+  max_read_calls: 10
+  max_open_directories: null  # All parent/child directories are always visible.
+reward:
+  formula: full_directory_orm_v1
+  # q=1 if Judge=1 else raw word F1; outcome_reward=2*q-1.
+  judge_f1_alpha: null
+  # Format is a single 0/1 trajectory bonus, not a per-ID format deduction.
+  format_penalty_mode: binary_protocol
+  format_penalty: 0.0
+  visible_navigation_penalty: null
+  read_call_cost: 0.01
+  repetition_penalty: 0.1
+training:
+  # Save validation checkpoints only. Reclaim the superseded latest before
+  # writing its replacement, always protecting a complete primary best.
+  checkpoint_retention: best_and_latest_overwrite
+  process_reward:
+    enabled: false
+  visible_navigation_negative_advantage:
+    enabled: false
+    include_repeated_segments: false
+  output_dir: runs/locomo_lmes_full_directory_orm/train
+jobs:
+  experiment_name: locomo_lmes_full_directory_orm

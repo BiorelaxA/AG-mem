@@ -1,0 +1,16 @@
+# New 400/50/50 query split; legacy ORM session summaries keep their original prompt.
+# Existing GPT/Qwen summaries are preserved with per-entry provenance. Only missing
+# sessions invoke Qwen3.5-27B with the reference run's lookback=3 and 300-token limit.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+model_path: /share/home/wtma/model/qwen3.5-27b
+input_root: data/processed/longmemeval_811_seed42_20261111
+prepared_root: runs/locomo_longmemeval/prepared_longmemeval_811_flat
+reuse_train_root: runs/locomo_longmemeval/prepared
+reuse_test_roots:
+  - root: runs/evaluation/longmemeval_gpt5mini/prepared_test
+    label: gpt-5-mini
+  - root: runs/evaluation/format05_best_final/prepared_test
+    label: qwen3.5-27B
+writer_workers: 192
+timeout_seconds: 600
+retries: 3

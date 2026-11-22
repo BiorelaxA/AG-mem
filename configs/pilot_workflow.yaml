@@ -1,0 +1,4 @@
+# Build only these directories, then train/evaluate only the selected sources.
+directory_sources: [locomo, split_longmemeval_s]
+training_sources: [locomo, split_longmemeval_s]
+experiment: locomo_s

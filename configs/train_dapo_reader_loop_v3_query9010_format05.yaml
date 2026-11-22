@@ -1,0 +1,12 @@
+extends: train_dapo_reader_loop_v3_query9010_id_cost.yaml
+
+# Keep mixed-Judge groups; additionally admit all-correct groups containing
+# both clean and format-penalized trainable trajectories. All-wrong groups and
+# all-correct groups differing only in READ cost remain excluded.
+jobs:
+  experiment_name: locomo_dapo_reader_loop_v3_query9010_format05
+reward:
+  format_penalty: 0.5
+training:
+  filter_metric: judge_or_all_correct_format
+  output_dir: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train

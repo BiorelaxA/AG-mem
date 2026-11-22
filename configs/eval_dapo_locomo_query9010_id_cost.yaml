@@ -1,0 +1,5 @@
+extends: train_dapo_reader_loop_v3_query9010_id_cost.yaml
+data:
+  sources: [locomo]
+  splits: [test]
+  prepared_root: runs/locomo_longmemeval/prepared_test_locomo_query9010_seed42_20261102

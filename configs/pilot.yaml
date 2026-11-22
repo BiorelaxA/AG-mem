@@ -1,0 +1,16 @@
+extends: default.yaml
+
+data:
+  layout: by_source
+  prepared_root: runs/locomo_longmemeval/prepared
+# Available dataset registry. The sbatch workflow selects build/train sources separately.
+  sources: [locomo, split_longmemeval_s, split_longmemeval_m]
+  splits: [train, validation]
+
+service:
+  # Preserve the previous Writer cache identity when importing completed summaries.
+  base_url: http://127.0.0.1:50543/v1
+
+training:
+  output_dir: runs/locomo_longmemeval/train
+  checkpoint_every: 1

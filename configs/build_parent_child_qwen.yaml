@@ -1,0 +1,43 @@
+protocol: parent_child_directory_v1
+model_path: /share/home/wtma/model/qwen3.5-27b
+# A new budget has a new immutable build identity; preserve the earlier run.
+output_root: runs/parent_child_directories/qwen27b_child300_v1
+workers: 48
+# Fallback is not a successful semantic summary. A rerun retries it by default.
+retry_fallback: true
+datasets:
+  - name: locomo
+    format: locomo_parquet
+    input_root: data/processed/locomo_query9010_seed42_20261102
+    splits: [train, validation, test]
+    modality_policy: existing_captions
+  - name: split_longmemeval_s
+    format: longmemeval_parquet
+    input_root: data/processed/query_dedup_val10_seed42_20261018
+    splits: [train, validation, test]
+    modality_policy: existing_captions
+  - name: split_longmemeval_m
+    format: longmemeval_parquet
+    input_root: data/processed/query_dedup_val10_seed42_20261018
+    splits: [train, validation, test]
+    modality_policy: existing_captions
+writer:
+  context_tokens: 65536
+  output_tokens: 4096
+  max_output_tokens: 16384
+  safety_margin: 128
+  title_tokens: 24
+  parent_content_tokens: 200
+  child_content_tokens: 300
+  max_entities: 12
+  semantic_retries: 2
+  context_blocks: 2
+  fallback_blocks: 8
+  output_language: en
+service:
+  model: agmem-27b
+  api_key_env: AGMEM_API_KEY
+  timeout_seconds: 600
+  network_retries: 3
+  seed: 42
+  structured_outputs: true

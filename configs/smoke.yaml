@@ -1,0 +1,9 @@
+extends: default.yaml
+data:
+  prepared_root: data/prepared/smoke_session_jsonl_v2
+  sources: [locomo]
+  splits: [train, validation]
+training:
+  output_dir: runs/smoke_session_grpo
+  validation_every: 0
+  checkpoint_every: 1

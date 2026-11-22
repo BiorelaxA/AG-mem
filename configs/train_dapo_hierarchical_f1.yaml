@@ -1,0 +1,46 @@
+extends: train_dapo_reader_loop_v3_query9010_format05.yaml
+
+# Frozen adjacent-clustered parent/child directories; only Reader is trained.
+data:
+  layout: combined
+  directory_protocol: hierarchical_v1
+  sources: [locomo]
+  splits: [train, validation]
+  prepared_root: runs/locomo_hierarchical_adjacent_f1/prepared
+  frozen_directory_version: null  # Bound to the frozen store digest in run.json.
+jobs:
+  experiment_name: locomo_hierarchical_adjacent_f1
+reader:
+  prompt_version: hierarchical_v1
+memory:
+  record_unit: segment
+retrieval:
+  id_protocol: strict_v2
+  max_ids_per_call: 1
+  max_read_calls: 10
+  max_open_directories: 2
+task_agent:
+  prompt_version: hierarchical_evidence_v1
+  max_output_tokens: 2048
+reward:
+  formula: f1_cost_v1
+  text_outcome: word_f1
+  read_call_cost: 0.05
+  format_penalty_mode: per_id
+  format_penalty: 0.5
+  likelihood:
+    mode: "off"
+training:
+  algorithm: dapo
+  epochs: 3
+  group_size: 8
+  mini_batch_groups: 8
+  target_groups: 8
+  filter_metric: nonzero_advantage  # Also reject groups whose rollout F1 values are all zero.
+  advantage_std_floor: 0.0
+  process_reward:
+    enabled: false
+  validation_primary_metric: outcome_f1
+  validation_every: 4
+  checkpoint_every: 0
+  output_dir: runs/locomo_hierarchical_adjacent_f1/train

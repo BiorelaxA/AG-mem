@@ -1,0 +1,41 @@
+# Run from the repository root. Credentials are read only from environment variables.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+checkpoints:
+  best: checkpoint-00000020
+  final: checkpoint-00000032
+datasets: [locomo, split_longmemeval_s]
+input_root: data/processed/locomo_query9010_seed42_20261102
+prepared_root: runs/evaluation/format05_best_final/prepared_test
+reuse_roots:
+  locomo: runs/locomo_longmemeval/prepared_locomo_query9010_seed42_20261102
+  split_longmemeval_s: runs/locomo_longmemeval/prepared
+output_root: runs/evaluation/format05_best_final/results
+local_base_url: http://127.0.0.1:8000/v1
+judge_template_file: configs/protocols/format05_training_judge.json
+# Finish both local checkpoints without needing external network access.
+# Send the exported inputs to GPT on a separate, connected machine.
+task_agents: [local]
+export_remote_inputs: true
+# GPU 0 builds LongMemEval-S directories while GPUs 1/2 + 3 evaluate LoCoMo.
+# Once both finish, the same Reader/Task GPUs evaluate LongMemEval-S automatically.
+parallel_directory_build: true
+# Cross-query scheduling only; Reader/Task/Judge prompts and reward are unchanged.
+# Long Reader prompts are automatically split to respect the padded token budget.
+evaluation_execution:
+  reader_query_concurrency: 4
+  reader_batch_size: 4
+  reader_batch_max_tokens: 16384
+  local_scoring_workers: 2
+  remote_scoring_workers: 4
+remote_task:
+  # Exact provider model ID supplied by the user; --remote-model can override it.
+  model: gpt-5-mini
+  model_revision: gpt-5-mini
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  request_profile: openai_chat
+  send_seed: false
+  temperature: null
+  max_tokens_parameter: max_completion_tokens
+  timeout_seconds: 600
+  retries: 3

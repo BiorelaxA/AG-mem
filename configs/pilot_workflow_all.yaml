@@ -1,0 +1,4 @@
+# Later: all three datasets; completed LoCoMo/S directories are reused.
+directory_sources: [locomo, split_longmemeval_s, split_longmemeval_m]
+training_sources: [locomo, split_longmemeval_s, split_longmemeval_m]
+experiment: locomo_s_m

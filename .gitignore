@@ -1,0 +1,59 @@
+# Python and build outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local environments, caches and credentials
+/.venv/
+/venv/
+/.conda/
+.cache/
+/.aws/
+/.codex/
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Machine-specific overrides; keep the portable example in Git
+/configs/local.yaml
+/configs/local.yml
+/configs/local.*.yaml
+/configs/local.*.yml
+!/configs/local.example.yaml
+
+# Dataset payloads, prepared JSONL and generated audits travel separately from Git.
+# Keep data/processed/*/{manifest.json,*_manifest.jsonl,README.md,counts.csv,...}
+# so the fixed split metadata and input checksums remain versioned.
+/data/**/*.parquet
+/data/audits/
+/data/prepared/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Model weights, checkpoints and experiment output
+/models/
+/checkpoints/
+/runs/
+agmem-smoke-*.out
+agmem-smoke-*.err
+agmem-train-*.out
+agmem-train-*.err
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+pytorch_model*.bin

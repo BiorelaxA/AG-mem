@@ -1,0 +1,27 @@
+# Optional candidate-order comparison: move the original second candidate block first.
+# These are query IDs, not reusable rollouts; the initial Reader resamples them.
+# Applies only to epoch 0; all remaining training queries retain seeded order.
+extends: train_dapo_locomo_lmes_hierarchical_f1_2gpu.yaml
+
+training:
+  initial_query_ids:
+    - locomo/train/000783
+    - locomo/train/000701
+    - locomo/train/000706
+    - locomo/train/000057
+    - locomo/train/000455
+    - locomo/train/000974
+    - locomo/train/000296
+    - split_longmemeval_s/train/000291
+    - locomo/train/000303
+    - split_longmemeval_s/train/000269
+    - locomo/train/000376
+    - split_longmemeval_s/train/000004
+    - locomo/train/000880
+    - locomo/train/000188
+    - locomo/train/000272
+    - locomo/train/000015
+    - locomo/train/000423
+  output_dir: runs/locomo_lmes_context3_open1_repeatneg_batch2first/train
+jobs:
+  experiment_name: locomo_lmes_context3_open1_repeatneg_batch2first

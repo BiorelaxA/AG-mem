@@ -1,0 +1,11 @@
+extends: train_dapo_max1_no_call_cost_mixed_v2.yaml
+# Materialize once with: python -m agmem.validation_split
+# Add ceil(1% of distinct training queries) to each existing validation split.
+# Added questions are removed from train and balanced across support-session strata.
+data:
+  input_root: data/processed/query_dedup_val10_plus1pct_seed42_20261031
+  prepared_root: runs/locomo_longmemeval/prepared_val10_plus1pct_seed42_20261031
+reader:
+  prompt_version: evidence_loop_v3
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_max1_no_cost_reader_loop_v3_val_plus1pct/train

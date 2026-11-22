@@ -1,0 +1,11 @@
+extends: train_eval_locomo_s.yaml
+data:
+  # Keep the verified imported summaries and their original Writer provenance.
+  frozen_directory_version: 9fe3e3609f217f63a4b79c6d1d64e026f9e8431402ebd38253a7dca6ceeff6d1
+models:
+  reader_path: ../model/qwen3.5-4b
+  task_path: ../model/qwen3.5-27b
+training:
+  validation_every: 25
+  checkpoint_every: 25
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_4x80gb_v25/train

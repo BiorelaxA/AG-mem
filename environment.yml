@@ -1,0 +1,11 @@
+name: agmem
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip>=25
+  - setuptools>=77,<81
+  - pip:
+      - uv>=0.9,<1
+# Then install requirements-serving.txt with the CUDA wheel backend appropriate
+# to the allocated node. See doc/environment_setup.md; no existing env is modified.

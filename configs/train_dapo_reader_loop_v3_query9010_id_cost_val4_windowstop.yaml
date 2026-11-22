@@ -1,0 +1,6 @@
+extends: train_dapo_reader_loop_v3_query9010_id_cost_val4_restart.yaml
+# Optional fresh start when the previous process has no committed checkpoint.
+jobs:
+  experiment_name: locomo_dapo_reader_loop_v3_query9010_id_cost_val4_windowstop
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_id_cost_val4_windowstop/train

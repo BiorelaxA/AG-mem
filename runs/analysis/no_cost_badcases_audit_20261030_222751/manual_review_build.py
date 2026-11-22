@@ -1,0 +1,29 @@
+import json,sys
+from pathlib import Path
+from collections import Counter
+out=Path(__file__).resolve().parent
+allcases={c['candidate']:c for c in json.load(open(out/'badcase_manual_extracted.json'))}
+cache={c['candidate']:c for c in json.load(open(out/'manual_judge_cache_checks.json'))}
+notes={
+162:dict(category='scoring_protocol_or_judge_false_negative',finding='8条均读到唯一标注session后STOP，回答excited/free/connected to nature。原文同时支持这三个描述，gold只写前两项。Judge缓存标签确为WRONG；可能触发Refined中“额外列表项通常WRONG”的规定，不能判为Reader漏检。',caveat='Judge只返回二元标签，没有推理，不能确定其判错动机；语义上支持不等于当前协议下必得1。',snippets={'r_00002_6ab0e1c83ed5':['D3:27','D3:29']}),
+168:dict(category='missing_distinct_fact_after_partial_retrieval',finding='8条均仅读1个session后STOP，只得到education/infrastructure，漏掉另一个session的veterans。4条读session1、4条读session9，均未读session15。不是仅凭gold session数推断：已核对被漏的原文事实。',caveat='标注4个session但其中教育/基础设施重复，session1或9加session15即可覆盖答案，并不要求机械读取全部4个。',snippets={'r_00000_2bd3f9b1f3b9':['D1:8'],'r_00008_316edae507b8':['D9:8'],'r_00014_7b36396fca9d':['D15:1','D15:3']}),
+169:dict(category='partial_numeric_aggregation_and_multi_id_truncation',finding='8条实际都只得到1个session；6条回答$65、2条回答120，gold$185。chain$25+lights$40在A，helmet$120在B，原文证明确实需要合并信息。rollout1/2/7请求同时含A+B的3–4 IDs，被max1截为A后直接STOP；rollout4请求2 IDs截为B，再次read时JSON非法。',caveat='这能证明截断+未补读导致实际上下文缺项，不能证明允许多个ID后Task一定答对。标注4sessions里两个只是重复提$40，A+B已充分。',snippets={'r_00000_bf3f0623afee':['it cost me $25'],'r_00010_b3dc435c528f':['helmet for $120'],'r_00009_916332b85d3b':['which were $40'],'r_00046_7167e83974df':['which were $40']}),
+174:dict(category='task_answer_omits_fact_despite_full_annotated_coverage',finding='8条均读取唯一标注session后STOP，Task仅答Fresh pastries，漏coffee。原文同一session同时写coffee date、fresh pastries、catch up over coffee。扩大Reader采样或继续检索本身不是这个已覆盖案例的直接修复。',caveat='可确认Task输出相对gold不完整；无法从当前记录判断Task为何省略coffee。',snippets={'r_00025_b3003884c0a4':['D26:9','D26:10','D26:12']}),
+255:dict(category='temporal_answer_scoring_protocol_conflict',finding='8条读到唯一标注session后STOP，答12 August 2023 (last Saturday)。原文session日期为15 August 2023，句中last Saturday；gold为Saturday before August15。两者日历上等价，但Judge缓存WRONG。当前Refined禁止相对与绝对日期换算，且要求相对形式锚点相同，因此更像协议冲突，不能归因为没有检索能力。',caveat='Judge没有解释标签；不可断言实现bug，也不擅自改变用户此前选定的评分协议。',snippets={'r_00006_e63eee6fd620':['D7:1']}),
+272:dict(category='stale_session_selected_and_no_update_check',finding='8条都读2023/08/11旧session后STOP，答twice weekly。该旧session原文确实twice a week；2023/11/30另一个标注session更新为three times a week，未被读取。是漏掉更新信息，不是算术/Judge误判。',caveat='按原文更新关系确认；并非所有两个标注session的问题都必须两个一起读，这题若直接选最新session即可答对。',snippets={'r_00003_91e98d12dde8':["I've been doing yoga twice a week"],'r_00019_9cae87fc83f5':['which is three times a week']}),
+302:dict(category='temporal_answer_scoring_protocol_conflict',finding='policy48中7条读唯一标注session并答Last weekend (14–15 October 2023)，1条无有效ID并答不知道。原文session17 October、last weekend，gold为weekend before17October。前7条实际语义/日期等价却缓存WRONG，与Refined严格相对日期规则有关；第8条确实没取到证据。',caveat='同一全错组内部原因不同，不能用一个group标签将8条全部归类为漏证据。Judge原始输出仅WRONG，动机无法直接证明。',snippets={'r_00013_dd0dbbf9e326':['D14:1']}),
+315:dict(category='question_evidence_date_ambiguity_mixed_with_wrong_session',finding='policy48中2条读取正确标注session后，Task指出日期冲突并最终答不知道：问题问Monday beforeJuly24，而July27的原文只说onMonday（通常July24，非July17）。另外6条没有读取标注session，答不知道，其中部分还空read循环。当前gold为volunteered at a pet shelter，不能把全部8条都简单归为Reader早停。',caveat='问题日期与原文存在表述歧义，不等价于已证明标注错误；仍按当前Judge记录0报告。',snippets={'r_00012_14eea4050cd5':['D13:1']})}
+results=[]
+for cid,note in notes.items():
+ c=allcases[cid];snips=[]
+ for rec in c['records']:
+  if rec['id'] not in note['snippets']:continue
+  matches=note['snippets'][rec['id']]
+  for m in rec['messages']:
+   if m.get('dia_id') in matches or any(v in m['content'] for v in matches):
+    snips.append({'id':rec['id'],'source_session_id':rec['source_session_id'],'session_time':rec['time'],'dia_id':m.get('dia_id'),'role':m['role'],'content':m['content']})
+ rows=[{'rollout':r['rollout'],'actual_ids':r['ids'],'gold_hits':r['gold_hits'],'covered_all_annotated_ids':r['covered_all'],'task_answer':r['answer'],'judge':r['judge'],'termination_reason':r['termination_reason'],'reader_steps':r['steps']} for r in c['rows']]
+ results.append({'candidate':cid,'policy':c['policy'],'sample_id':c['sample_id'],'question':c['question'],'gold_answer':c['answer'],'gold_source_sessions':c['answer_session_ids'],'gold_directory_ids':c['gold_directory_ids'],'category':note['category'],'finding_zh':note['finding'],'caveat_zh':note['caveat'],'answer_counts':dict(Counter(r['answer'] for r in c['rows'])),'raw_evidence_excerpts':snips,'cached_judgments':cache[cid]['cached_judgments'],'rollouts':rows})
+result={'scope':'Manual, purposive review of 8 all-Judge-wrong candidate groups from frozen policy32/48 sample. Not a random sample and not a causal population-rate estimate.','source_snapshot':str(out/'snapshot.json'),'method':'No model calls. Compared raw parquet gold, prepared original messages, actual reader new_ids/actions, Task outputs, and reconstructed exact Judge cache keys with stored raw labels.','important_limitations':['Annotated supporting session count is not minimal necessary session count. Repeated support sessions can be alternatives or duplicates.','Full annotation coverage does not prove all gold facts are actually supported or answerable; raw text inspection remains necessary.','All8wrong means all eight Judge labels zero, not eight semantically proven failures.','Task and Judge use temperature0 plus identical-request cache: repeated identical evidence yields repeated Task answer/Judge label, not eight independent downstream samples.','No error-category proportions should be extrapolated from these purposefully selected examples.'],'cases':results}
+(out/'badcase_manual_review.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print('Wrote',out/'badcase_manual_review.json','cases',len(results))

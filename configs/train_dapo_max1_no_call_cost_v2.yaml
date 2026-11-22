@@ -1,0 +1,11 @@
+extends: train_dapo_max1_v2.yaml
+# Reward: 2 * J - 1 - 0.1 * number_of_bad_reader_decisions.
+# Keep read-call metrics, but do not charge for taking another retrieval step.
+reward:
+  read_call_cost: 0.0
+training:
+  # Uniform-Judge groups may learn from format differences. Only zero-signal
+  # groups are filtered; Reader-truncated rollouts remain loss-masked.
+  filter_metric: reward
+  filter_min_std: 0.0
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_reward_filter_micro2_parallel4_reader_ids_v2_format_count_max1_no_call_cost/train

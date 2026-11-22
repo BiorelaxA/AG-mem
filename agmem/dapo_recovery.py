@@ -1,0 +1,197 @@
+"""Archive artifacts beyond a committed DAPO checkpoint before continuing a run.
+
+The caller must hold the run's exclusive lock. Legacy policies archive discarded
+artifacts under resume_orphans. Explicit overwrite retention discards obsolete
+checkpoint payloads while preserving the complete recovery point and log audit.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+import shutil
+import uuid
+
+from .checkpoints import select_best_checkpoints
+
+
+def _integer(value, name):
+    if type(value) is not int or value < 0:
+        raise ValueError(f"Recovery requires a nonnegative integer {name}")
+    return value
+
+
+def _reconcile_jsonl(path, field, limit, *, inclusive):
+    """Plan a rewrite without mutating files; only a broken final record is recoverable."""
+    original = path.read_bytes()
+    lines = original.splitlines(keepends=True)
+    populated = [index for index, line in enumerate(lines) if line.strip()]
+    last = populated[-1] if populated else -1
+    retained = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            retained.append(line)
+            continue
+        try:
+            value = json.loads(line)
+        except (ValueError, UnicodeDecodeError) as exc:
+            if index == last:
+                continue
+            raise ValueError(f"Corrupt JSONL record before the tail: {path}:{index + 1}") from exc
+        if not isinstance(value, dict) or field not in value:
+            raise ValueError(f"Missing {field} in recovery log: {path}:{index + 1}")
+        position = _integer(value[field], f"{path.name}:{index + 1}:{field}")
+        if position < limit or (inclusive and position == limit):
+            retained.append(line if line.endswith(b"\n") else line + b"\n")
+    updated = b"".join(retained)
+    return updated if updated != original else None
+
+
+def _indexed_artifacts(root, directory, prefix, suffix, limit, *, inclusive):
+    parent = root / directory if directory else root
+    if not parent.exists():
+        return []
+    result = []
+    for path in parent.glob(prefix + "*" + suffix):
+        name = path.name
+        middle = name[len(prefix):len(name) - len(suffix)] if suffix else name[len(prefix):]
+        if middle.isdigit() and (int(middle) > limit if inclusive else int(middle) >= limit):
+            result.append(path)
+    return result
+
+
+def _atomic_bytes(path, content):
+    temporary = path.with_name(path.name + f".resume-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def reconcile_run(run_dir, state, *, checkpoint_policy=None):
+    """Retain committed updates and their saved sampling buffer, archive the rest.
+
+    Group trace filenames use the *pre-update* zero-based step. Candidate IDs use
+    a separate monotonically increasing cursor and can be ahead of optimizer
+    steps because a checkpoint may contain unconsumed, already sampled groups.
+    Returns the archive path (or None for an already reconciled run).
+    """
+    root = Path(run_dir)
+    step = _integer(state["step"], "step")
+    retention = (checkpoint_policy if checkpoint_policy is not None else
+                 state.get("config", {}).get("training", {}).get("checkpoint_retention", "legacy"))
+    if retention not in {"legacy", "best_and_latest", "best_and_latest_overwrite"}:
+        raise ValueError("Unknown checkpoint retention policy during recovery")
+    overwrite = retention == "best_and_latest_overwrite"
+    if overwrite:
+        from .checkpoints import (_overwrite_checkpoint_state, _publish_checkpoint_aliases,
+                                  _select_best_checkpoints, _primary_checkpoint,
+                                  _prune_obsolete_checkpoints, cleanup_overwrite_temporaries,
+                                  refresh_checkpoint_aliases)
+        checkpoint_paths, _ = _overwrite_checkpoint_state(root)
+        resume_path = root / f"checkpoint-{step:08d}"
+        if resume_path not in checkpoint_paths:
+            raise ValueError("Overwrite recovery requires the complete checkpoint being resumed")
+    dapo_state = state["dapo_state"]
+    candidate_index = _integer(dapo_state["sampler"].get("candidate_index", 0), "candidate_index")
+    skip_index = _integer(dapo_state.get("counters", {}).get("skipped_zero_signal_batches", 0), "skip_index")
+    zero_signal_boundary = _integer(dapo_state["sampler"].get("batch_index", 0), "batch_index")
+    active = dapo_state.get("active")
+    if active and "batch_id" in active:
+        # Sampling advances batch_index before the pending batch is consumed.
+        # Any skip artifact from that still-active batch is uncommitted too.
+        batch_id = active["batch_id"]
+        if not isinstance(batch_id, str) or not batch_id.startswith("batch-") or not batch_id[6:].isdigit():
+            raise ValueError("Recovery requires an indexed active DAPO batch_id")
+        zero_signal_boundary = min(zero_signal_boundary, int(batch_id[6:]))
+    rewrites = []
+    for filename, field, limit, inclusive in (
+        ("train_metrics.jsonl", "step", step, True),
+        ("sampling_metrics.jsonl", "candidate_index", candidate_index, True),
+        ("candidate_metrics.jsonl", "candidate_id", candidate_index, False),
+        ("skipped_updates.jsonl", "skip_index", skip_index, True),
+    ):
+        path = root / filename
+        if path.is_file():
+            content = _reconcile_jsonl(path, field, limit, inclusive=inclusive)
+            if content is not None:
+                rewrites.append((path, content))
+
+    moves = []
+    for directory, prefix, suffix, limit, inclusive in (
+        ("groups", "group-", ".json.gz", step, False),
+        ("rollouts", "group-", ".json", step, False),
+        ("candidate_rollouts", "candidate-", ".json", candidate_index, False),
+        ("zero_signal_batches", "batch-", "", zero_signal_boundary, False),
+        ("validation", "step-", "", step, True),
+        ("", "checkpoint-", "", step, True),
+    ):
+        moves.extend(_indexed_artifacts(root, directory, prefix, suffix, limit, inclusive=inclusive))
+    if not overwrite:
+        moves.extend(root.glob("checkpoint-*.building"))
+    archive = None
+    archived = []
+
+    def archive_item(path, *, move):
+        nonlocal archive
+        if archive is None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            archive = root / "resume_orphans" / f"{stamp}-{uuid.uuid4().hex[:8]}"
+            archive.mkdir(parents=True)
+        relative = path.relative_to(root)
+        destination = archive / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if move:
+            path.rename(destination)
+        else:
+            shutil.copy2(path, destination)
+        archived.append(str(relative))
+
+    # Every JSONL was checked before the first mutation. Overwrite mode keeps
+    # checkpoint payloads within its two-copy budget rather than archiving
+    # partial/future weights in resume_orphans; other artifacts remain audited.
+    discarded = []
+    if overwrite:
+        surviving = [path for path in checkpoint_paths
+                     if int(path.name.removeprefix("checkpoint-")) <= step]
+        selected = _select_best_checkpoints(surviving)
+        _publish_checkpoint_aliases(root, _primary_checkpoint(surviving, selected), surviving[-1])
+        obsolete = [path for path in checkpoint_paths if path not in surviving]
+        moves = [path for path in moves if path not in obsolete]
+        discarded.extend(str(path.relative_to(root)) for path in obsolete)
+        # Rename before deleting committed payloads, so an interrupted cleanup
+        # is excluded from the next latest_checkpoint scan.
+        _prune_obsolete_checkpoints(root, obsolete)
+        discarded.extend(str(path.relative_to(root)) for path in cleanup_overwrite_temporaries(root))
+    for path in sorted(set(moves)):
+        archive_item(path, move=True)
+    for path, content in rewrites:
+        archive_item(path, move=False)
+        _atomic_bytes(path, content)
+
+    index = root / "best_checkpoints.json"
+    best = select_best_checkpoints(root)
+    encoded = (json.dumps(best, ensure_ascii=False, indent=2) + "\n").encode()
+    previous = None
+    if index.is_file():
+        try:
+            previous = json.loads(index.read_bytes())
+        except (ValueError, UnicodeDecodeError):
+            pass
+        if previous != best:
+            archive_item(index, move=False)
+            _atomic_bytes(index, encoded)
+    elif best:
+        _atomic_bytes(index, encoded)
+
+    if overwrite:
+        refresh_checkpoint_aliases(root)
+
+    result = {"step": step, "candidate_index": candidate_index,
+              "archive": str(archive) if archive else None, "archived_artifacts": archived}
+    if overwrite:
+        result["discarded_checkpoints"] = discarded
+    if archive:
+        _atomic_bytes(archive / "recovery.json", (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode())
+    return result

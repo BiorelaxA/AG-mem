@@ -1,0 +1,16 @@
+extends: train_dapo_locomo_s_4x80gb.yaml
+# New experiment: mixed Judge groups only; keep the v1 configs reproducible.
+retrieval:
+  id_protocol: strict_v2
+reward:
+  formula: judge_cost_v2
+  likelihood:
+    mode: "off"
+    advantage_std_floor: 0.0
+training:
+  filter_metric: judge
+  advantage_std_floor: 0.0
+  mini_batch_groups: 1
+  micro_batch_rollouts: 1
+  max_micro_batch_tokens: 16384
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2/train

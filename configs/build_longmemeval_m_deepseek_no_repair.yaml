@@ -1,0 +1,66 @@
+# Optional continuation: retain all frozen DeepSeek commits, including fallback.
+# CPU import precedes inference; source caches and traces are not imported.
+protocol: adjacent_topic_event_deepseek_no_repair_v3
+# CPU reference tokenizer only: preserves previous summary/segmentation budgets.
+# No local Qwen3.5-27B inference server is deployed by this recipe.
+model_path: models/qwen3.5-27b
+source_root: runs/parent_child_directories/deepseek_flash_lmem_adjacent_v1
+output_root: runs/parent_child_directories/deepseek_flash_lmem_adjacent_no_repair_v3
+workers: 256
+retry_fallback: false
+preserve_existing_directories: false
+datasets:
+  - name: split_longmemeval_m
+    format: longmemeval_parquet
+    input_root: data/processed/longmemeval_315_35_150_seed42_20261113
+    splits: [train, validation, test]
+    modality_policy: existing_captions
+embedding:
+  model_id: Qwen/Qwen3-Embedding-4B
+  model_path: models/qwen3-embedding-4b
+  model: agmem-embedding
+  instruction: >-
+    Represent the conversation message for grouping consecutive messages
+    about the same local topic, event, or information need. Preserve the user's personal
+    facts, constraints, corrections, and follow-up intent.
+  max_input_tokens: 4096
+  token_margin: 8
+  batch_size: 32
+  max_batch_tokens: 16384
+  workers: 8
+  expected_dimensions: 2560
+  timeout_seconds: 120
+  network_retries: 3
+  api_key_env: AGMEM_API_KEY
+segmentation:
+  high_threshold: 0.72
+  low_threshold: 0.50
+  min_cohesion: 0.4
+  max_segment_tokens: 4096
+  context_weight: 0.15
+  context_chars: 256
+  review_enabled: true
+  max_review_calls_per_session: 32
+writer:
+  context_tokens: 65536
+  output_tokens: 4096
+  max_output_tokens: 16384
+  safety_margin: 128
+  title_tokens: 24
+  parent_content_tokens: 400
+  child_content_tokens: 300
+  max_entities: 12
+  semantic_retries: 0
+  context_blocks: 1
+  fallback_blocks: 8
+  output_language: en
+service:
+  model: deepseek-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  timeout_seconds: 1200
+  network_retries: 6
+  retry_base_seconds: 1
+  retry_max_seconds: 30
+  retry_spacing_seconds: 0.05
+  trust_env: true

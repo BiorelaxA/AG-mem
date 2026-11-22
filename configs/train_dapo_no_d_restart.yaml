@@ -1,0 +1,8 @@
+extends: train_dapo_locomo_s_4x80gb.yaml
+reward:
+  likelihood:
+    mode: "off"
+task_agent:
+  max_output_tokens: 512
+training:
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_no_d_20261027-235048/train

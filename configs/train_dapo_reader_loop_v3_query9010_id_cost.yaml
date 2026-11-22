@@ -1,0 +1,16 @@
+extends: train_dapo_reader_loop_v3_query9010.yaml
+# Keep original non-ID format penalties; count the four ID violations per ID.
+# Charge each bad ID position once even when it violates several rules.
+data:
+  sources: [locomo]
+jobs:
+  experiment_name: locomo_dapo_reader_loop_v3_query9010_id_cost
+  test_prepared_root: runs/locomo_longmemeval/prepared_test_locomo_query9010_seed42_20261102
+reward:
+  format_penalty_mode: per_id
+  format_penalty: 0.1
+  read_call_cost: 0.01
+training:
+  mini_batch_groups: 8
+  validation_every: 4
+  output_dir: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_id_cost/train

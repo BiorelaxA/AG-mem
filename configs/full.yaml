@@ -1,0 +1,10 @@
+extends: default.yaml
+
+data:
+  prepared_root: runs/slurm_full_train/prepared
+  splits: [train, validation]
+
+training:
+  output_dir: runs/slurm_full_train/train
+  # A group can take minutes; save each update so a 10-hour allocation can resume.
+  checkpoint_every: 1

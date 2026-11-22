@@ -1,0 +1,12 @@
+extends: train_dapo_micro2_v2.yaml
+# Four fixed, ordered candidate groups per inference window. Only the owner
+# thread drives Reader generation; two HTTP workers score Task/Judge requests.
+execution:
+  sampling_group_concurrency: 4
+  reader_batch_size: 4
+  reader_batch_max_tokens: 16384
+  task_agent_workers: 2
+training:
+  mini_batch_groups: 1
+  micro_batch_rollouts: 2
+  output_dir: runs/locomo_longmemeval/experiments/locomo_s_dapo_mixed_v2_micro2_parallel4/train

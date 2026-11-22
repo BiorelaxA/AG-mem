@@ -1,0 +1,36 @@
+# Re-answer the same completed Reader evidence with the requested answer format.
+training_run: runs/locomo_longmemeval/experiments/locomo_dapo_reader_loop_v3_query9010_format05/train
+checkpoints:
+  best: checkpoint-00000020
+  final: checkpoint-00000032
+datasets: [locomo]
+input_root: data/processed/locomo_query9010_seed42_20261102
+prepared_root: runs/evaluation/format05_best_final/prepared_test
+reuse_roots:
+  locomo: runs/locomo_longmemeval/prepared_locomo_query9010_seed42_20261102
+retrieval_reuse_root: runs/evaluation/format05_best_final/results
+output_root: runs/evaluation/format05_best_final/answer_tags/results
+task_prompt_version: history_answer_v1
+task_max_output_tokens: 2048
+judge_template_file: configs/protocols/format05_training_judge.json
+local_base_url: http://127.0.0.1:8000/v1
+task_agents: [local]
+export_remote_inputs: true
+parallel_directory_build: false
+evaluation_execution:
+  reader_query_concurrency: 4
+  reader_batch_size: 4
+  reader_batch_max_tokens: 16384
+  local_scoring_workers: 2
+  remote_scoring_workers: 2
+remote_task:
+  model: gpt-5-mini
+  model_revision: gpt-5-mini
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  request_profile: openai_chat
+  send_seed: false
+  temperature: null
+  max_tokens_parameter: max_completion_tokens
+  timeout_seconds: 120
+  retries: 3

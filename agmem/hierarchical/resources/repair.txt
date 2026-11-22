@@ -1,0 +1,11 @@
+Your previous directory failed deterministic validation.
+Re-read the ORIGINAL input and return a complete corrected JSON object.
+Keep every writable block covered exactly once. Do not change the source or invent IDs.
+Validation errors:
+{{VALIDATION_ERRORS_JSON}}
+
+Previous response:
+{{PREVIOUS_RESPONSE_TEXT}}
+
+Original input:
+{{WRITER_INPUT_JSON}}

@@ -1,0 +1,74 @@
+extends: train_dapo_hierarchical_f1.yaml
+
+# Current mixed ORM: global seeded query shuffle, no source oversampling.
+# Each source keeps its own immutable input snapshot; tests never enter training.
+data:
+  sources: [locomo, split_longmemeval_s]
+  splits: [train, validation]
+  layout: combined
+  input_root: data/processed/locomo_query9010_seed42_20261102
+  input_roots:
+    locomo: data/processed/locomo_query9010_seed42_20261102
+    split_longmemeval_s: data/processed/longmemeval_315_35_150_seed42_20261113
+  prepared_root: runs/locomo_lmes_context3_open1_nav06/prepared
+  source_specs:
+    - name: locomo
+      input_root: data/processed/locomo_query9010_seed42_20261102
+      directory_root: runs/parent_child_directories/qwen27b_locomo_topic_event_context3_v1
+    - name: split_longmemeval_s
+      input_root: data/processed/longmemeval_315_35_150_seed42_20261113
+      directory_root: runs/parent_child_directories/qwen27b_adjacent_qwen4b_31535150_incremental_v2
+      fallback_repairs: runs/parent_child_directories/longmemeval_s_31535150_fallback_repair_len500_20261114
+      pending_repairs: runs/parent_child_directories/longmemeval_s_31535150_pending_parents_20261114
+models:
+  reader_path: models/qwen3.5-4b
+  task_path: models/qwen3.5-27b
+retrieval:
+  max_ids_per_call: 1
+  max_read_calls: 10
+  max_open_directories: 1
+reward:
+  formula: judge_f1_cost_v1
+  judge_f1_alpha: 0.8
+  read_call_cost: 0.05
+  format_penalty: 0.1
+  visible_navigation_penalty: 0.1
+  format_penalty_mode: per_id
+  judge:
+    # Use the existing relaxed LoCoMo and unchanged official LME templates.
+    template_file: null
+    protocols:
+      locomo: locomo_refined
+      split_longmemeval_s: longmemeval_official
+      split_longmemeval_m: longmemeval_official
+    max_output_tokens: 128
+    seed: 42
+execution:
+  sampling_group_concurrency: 1
+  reader_batch_size: 1
+  reader_batch_max_tokens: 16384
+  task_agent_workers: 2
+training:
+  # Temporarily disabled at the user's request; still report free capacity.
+  enforce_storage_reserve: false
+  learning_rate: 0.000001
+  epochs: 3
+  group_size: 8
+  candidate_groups: 32
+  target_groups: 8
+  mini_batch_groups: 8
+  micro_batch_rollouts: 1
+  max_micro_batch_tokens: 16384
+  validation_every: 4
+  checkpoint_every: 0
+  checkpoint_retention: best_and_latest
+  keep_last_checkpoints: 1
+  validation_primary_metric: outcome_f1
+  filter_metric: judge_nonzero_advantage
+  visible_navigation_negative_advantage:
+    enabled: true
+    magnitude: 1.0
+    include_repeated_segments: true
+  output_dir: runs/locomo_lmes_context3_open1_repeatneg/train
+jobs:
+  experiment_name: locomo_lmes_context3_open1_repeatneg
