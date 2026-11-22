@@ -10,8 +10,8 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 # Set DEEPSEEK_API_KEY externally. --dry-run and --import-only use no API or GPU.
 # The package carries reference tokenizer files; install Embedding-4B separately.
-exec python -u -m agmem.build_portable_deepseek_directories \
-    --config configs/build_longmemeval_m_deepseek_no_repair.yaml \
+exec python -u -m agmem.build_deepseek_directories_gpu --previous-segment \
+    --config configs/build_longmemeval_m_deepseek_previous_segment.yaml \
     --migration-manifest "${AGMEM_MIGRATION_MANIFEST:-migration/longmemeval_m_continuation.json}" \
     --workers "${AGMEM_WRITER_WORKERS:-256}" \
     --embedding-max-model-len "${AGMEM_EMBEDDING_MAX_MODEL_LEN:-8192}" \

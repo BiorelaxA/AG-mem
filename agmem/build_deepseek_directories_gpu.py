@@ -37,7 +37,9 @@ def allocated_devices(visible):
 
 
 def build_command(args, endpoints=None):
-    command = [sys.executable, "-u", "-m", "agmem.build_deepseek_directories",
+    module = ("agmem.build_deepseek_previous_segment" if getattr(args, "previous_segment", False)
+              else "agmem.build_deepseek_directories")
+    command = [sys.executable, "-u", "-m", module,
                "--config", args.config, "--workers", str(args.workers)]
     for name in ("datasets", "splits"):
         values = getattr(args, name, None)
@@ -49,6 +51,12 @@ def build_command(args, endpoints=None):
             command.extend(["--" + name.replace("_", "-"), str(value)])
     if endpoints:
         command.extend(["--embedding-base-urls", *endpoints])
+    if getattr(args, "previous_segment", False):
+        for name in ("source_root", "migration_manifest"):
+            if getattr(args, name, None):
+                command.extend(["--" + name.replace("_", "-"), getattr(args, name)])
+        if getattr(args, "import_only", False):
+            command.append("--import-only")
     if args.dry_run:
         command.append("--dry-run")
     return command
@@ -163,6 +171,12 @@ def launch(args):
     _validate_options(args)
     # CPU-only validation reads local files but loads no GPU weights, and needs
     # no credentials, CUDA initialization or network access.
+    if getattr(args, "previous_segment", False) and not args.dry_run:
+        imported = copy(args)
+        imported.import_only = True
+        subprocess.run(build_command(imported), check=True, env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+        if args.import_only:
+            return None
     if args.dry_run:
         subprocess.run(build_command(args, args.embedding_base_urls), check=True,
                        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
@@ -281,8 +295,13 @@ def launch(args):
     return job
 
 
-def argument_parser():
+def argument_parser(*, previous_segment_options=False):
     parser = argparse.ArgumentParser(description=__doc__)
+    if previous_segment_options:
+        parser.add_argument("--previous-segment", action="store_true")
+        parser.add_argument("--migration-manifest")
+        parser.add_argument("--source-root")
+        parser.add_argument("--import-only", action="store_true")
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--workers", type=int, default=64)
     parser.add_argument("--datasets", nargs="+", choices=["split_longmemeval_m"], default=["split_longmemeval_m"])
@@ -302,7 +321,7 @@ def argument_parser():
 
 
 def main():
-    launch(argument_parser().parse_args())
+    launch(argument_parser(previous_segment_options=True).parse_args())
 
 
 if __name__ == "__main__":
