@@ -27,6 +27,7 @@ PROTOCOL = "adjacent_topic_event_directory_v2"
 # The distinct construction identity below versions the boundary policy alone.
 PROMPT_VERSION = "directory-writer.adjacent.v1"
 BOUNDARY_PROMPT_VERSION = "topic_event.v2"
+DATASETS = legacy.DATASETS | {"split_longmemeval_m"}
 BOUNDARY_PROMPT = (Path(__file__).with_name("hierarchical") / "resources" /
                    "adjacent" / "topic_event_v2" / "boundary.txt")
 _BASE_LOAD_RECIPE = legacy.load_recipe
@@ -37,13 +38,16 @@ _ADAPTATION_LOCK = RLock()
 def _topic_event_engine():
     """Adapt only this dedicated worker's engine globals, restoring on exit."""
     with _ADAPTATION_LOCK:
-        previous = legacy.PROTOCOL, legacy.load_recipe
+        previous = legacy.PROTOCOL, legacy.load_recipe, legacy.DATASETS
         legacy.PROTOCOL = PROTOCOL
         legacy.load_recipe = load_recipe
+        # Extend the v2 workflow without changing the implementation hash of
+        # the legacy engine used by existing v1 build journals.
+        legacy.DATASETS = DATASETS
         try:
             yield
         finally:
-            legacy.PROTOCOL, legacy.load_recipe = previous
+            legacy.PROTOCOL, legacy.load_recipe, legacy.DATASETS = previous
 
 
 def load_recipe(path, workers=None, *, embedding_model_path=None, output_root=None,
@@ -113,7 +117,7 @@ def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--workers", type=int)
-    parser.add_argument("--datasets", nargs="+", choices=sorted(legacy.DATASETS))
+    parser.add_argument("--datasets", nargs="+", choices=sorted(DATASETS))
     parser.add_argument("--splits", nargs="+", choices=["train", "validation", "test"])
     urls = parser.add_mutually_exclusive_group()
     urls.add_argument("--base-url")

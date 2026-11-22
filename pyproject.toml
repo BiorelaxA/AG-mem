@@ -16,7 +16,7 @@ dependencies = {file = ["requirements.txt"]}
 include = ["agmem*"]
 
 [tool.setuptools.package-data]
-"agmem.hierarchical" = ["resources/*.json", "resources/*.txt", "resources/adjacent/*.json", "resources/adjacent/*.txt"]
+"agmem.hierarchical" = ["resources/*.json", "resources/*.txt", "resources/adjacent/*.json", "resources/adjacent/*.txt", "resources/adjacent/*/*.txt"]
 
 [project.scripts]
 agmem = "agmem.cli:main"
