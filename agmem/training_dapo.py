@@ -316,7 +316,7 @@ def train_dapo(config, max_groups=None, resume=None, *, validate_before_training
             if "dapo_state" not in state:
                 raise ValueError("A GRPO checkpoint cannot resume a DAPO experiment")
         model_path = str(Path(resume) / "model") if resume else config["models"]["reader_path"]
-        model = load_model(model_path, config["reader"]["device"], checkpointing=True)
+        model = load_model(model_path, config["reader"]["device"], checkpointing=True, reader_settings=config["reader"])
         model.requires_grad_(True)
         policy = HFPolicy(model, load_tokenizer(model_path), config["reader"])
         optimizer = CPUAdamW(model, config["training"]["learning_rate"], config["training"]["weight_decay"])

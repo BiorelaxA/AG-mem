@@ -75,7 +75,8 @@ def main():
     elif args.command == "evaluate":
         from .policy import HFPolicy, load_model, load_tokenizer
         path = args.checkpoint or config["models"]["reader_path"]
-        policy = HFPolicy(load_model(path, config["reader"]["device"]), load_tokenizer(path), config["reader"], temperature=0.0)
+        policy = HFPolicy(load_model(path, config["reader"]["device"], reader_settings=config["reader"]),
+                          load_tokenizer(path), config["reader"], temperature=0.0)
         store = pipeline.open_prepared(config)
         try:
             print(json.dumps(pipeline.evaluate_with_policy(config, store, policy, args.split, args.output, args.limit), ensure_ascii=False, indent=2))

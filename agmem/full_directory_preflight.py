@@ -9,7 +9,7 @@ from statistics import median
 from .core import CapacityError
 from .full_directory_prompts import full_directory_reader_messages
 from .hierarchical.reader import DirectoryReader
-from .policy import chat_token_ids, load_tokenizer
+from .policy import chat_token_ids, load_tokenizer, reader_yarn_config
 
 
 def _positive_integer(value, name):
@@ -63,6 +63,11 @@ def initial_context_report(config, store, examples_by_split):
     if limit is None:
         limit = native_limit
     limit = _positive_integer(limit, "Reader context limit")
+    if settings.get("yarn_factor") is not None:
+        extended = reader_yarn_config(model_path, settings).text_config
+        native_limit = extended.rope_parameters["original_max_position_embeddings"]
+    elif native_limit is not None and limit > native_limit:
+        raise ValueError("Reader max_context_tokens exceeds model capacity without configured RoPE scaling")
     tokenizer = load_tokenizer(str(model_path))
     version = store.get_metadata("directory_version")
     views, rows = {}, []
@@ -93,6 +98,7 @@ def initial_context_report(config, store, examples_by_split):
               "reader_prompt_version": "hierarchical_full_v1",
               "directory_protocol": "hierarchical_v1", "directory_version": version,
               "native_context_limit": native_limit, "context_limit": limit,
+              "yarn_factor": settings.get("yarn_factor"),
               "output_token_reserve": reserve, "memories": len(views),
               "percentile_method": "nearest_rank", "gpu_memory_checked": False,
               **_summary(rows),

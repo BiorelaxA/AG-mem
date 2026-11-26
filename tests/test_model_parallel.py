@@ -7,7 +7,7 @@ from unittest.mock import patch
 import torch
 
 from agmem.model_parallel import place_reader_layers, reader_devices
-from agmem.policy import HFPolicy, sequence_logprobs
+from agmem.policy import HFPolicy, load_model, sequence_logprobs
 from agmem.grpo import CPUAdamW
 from agmem.runtime_memory import activation_offload_context, memory_settings
 from tests.test_qwen_batch import Qwen3_5Config, Qwen3_5ForConditionalGeneration, Tokenizer
@@ -93,6 +93,22 @@ class LayerPlacementTests(unittest.TestCase):
 
     def test_cpu_hooks_cache_backward_optimizer_and_checkpoint(self):
         self.check_placement(["cpu", "cpu"])
+
+    def test_yarn_generation_and_backward_beyond_native_limit_and_checkpoint_reload(self):
+        settings = dict(yarn_factor=2.0, max_context_tokens=256, max_new_tokens_per_decision=2,
+                        rollout_temperature=1.0)
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as checkpoint:
+            self.model.save_pretrained(source)
+            extended = load_model(source, "cpu", dtype="float32", checkpointing=True, reader_settings=settings)
+            self.assertEqual(extended.model.language_model.rotary_emb.rope_type, "yarn")
+            row = HFPolicy(extended, Tokenizer(), settings).complete([1, 2] * 70, 7)
+            extended.train()
+            sequence_logprobs(extended, row.prompt_ids, row.token_ids, 1.0, "cpu").sum().backward()
+            self.assertIsNotNone(extended.get_input_embeddings().weight.grad)
+            extended.save_pretrained(checkpoint)
+            restored = load_model(checkpoint, "cpu", dtype="float32", reader_settings=settings)
+            self.assertEqual(restored.config.text_config.max_position_embeddings, 256)
+            self.assertEqual(restored.config.text_config.rope_parameters["original_max_position_embeddings"], 128)
 
     def test_saved_cpu_tensors_with_qwen_checkpoint_recomputation(self):
         self.check_placement(["cpu", "cpu"], offload=True)

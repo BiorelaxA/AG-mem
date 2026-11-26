@@ -135,6 +135,26 @@ class MixedFrozenTrainingTests(unittest.TestCase):
             self.assertTrue(all(d['build']['status']=='complete' for d in directories))
         self.assertTrue(prepare_mixed(self.config)['reused'])
 
+    def test_previous_mixture_and_split_journals(self):
+        prepare_mixed(self.config)
+        spec = self.specs[1]
+        main = {'directory_root': spec['directory_root'], 'fallback_repairs': str(self.fallback)}
+        supplement = BuildStore(self.root/'supplement', self.identity)
+        self.addCleanup(supplement.close)
+        bank = next(b for b in self.banks[self.s] if b['query_memberships'][0]['sample_id'].endswith('train/000001'))
+        supplement.add_bank(bank)
+        for session in bank['sessions']:
+            supplement.add_session(session)
+            supplement.commit(session, self.directory(session), {})
+        data = self.config['data']
+        data['prepared_root'] = str(self.root/'new')
+        data['source_specs'] = [dict(self.specs[0], frozen_root=str(self.output)), {
+            'name': self.s, 'input_root': str(self.inputs[self.s]), 'split_journals': {
+                'train': [main, {'directory_root': str(supplement.root)}], 'validation': [main]}}]
+        result = prepare_mixed(self.config)
+        self.assertEqual(result['examples'], {'train': 4, 'validation': 2})
+        self.assertEqual(result['by_source'][self.s]['repairs_applied'], {'train/fallback': 1})
+
     def test_missing_repair_cannot_silently_drop_question(self):
         del self.config['data']['source_specs'][1]['pending_repairs']
         with self.assertRaisesRegex(ValueError,'no complete directory'):prepare_mixed(self.config)

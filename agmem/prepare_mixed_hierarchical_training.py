@@ -6,6 +6,7 @@ training store is published. No question, session or repair failure is skipped.
 """
 import argparse
 from collections import Counter
+from contextlib import ExitStack, closing
 from copy import deepcopy
 from dataclasses import asdict
 import json
@@ -65,12 +66,13 @@ def _frozen_source(spec, prepared, provenance, splits):
     # open/close their individual handles and leave no persistent descriptors.
     store=HierarchicalTrainingStore(root)
     source_identity=store.snapshot['prepare_identity']
-    if (store.snapshot['sources']!=[spec['name']] or not set(splits).issubset(store.snapshot['splits'])
+    source_identity=source_identity.get('datasets', {}).get(spec['name'], source_identity)
+    if (spec['name'] not in store.snapshot['sources'] or not set(splits).issubset(store.snapshot['splits'])
             or source_identity.get('input_manifest_sha256')!=prepared['input_manifest_sha256']):
         raise ValueError('Frozen source differs from the requested dataset/version')
     examples=[]; memories={}; banks={}
     for split in splits:
-        values=store.examples(split)
+        values=[e for e in store.examples(split) if e.source==spec['name']]
         if any(e.source!=spec['name'] or e.split!=split for e in values):
             raise ValueError('Frozen source has an unexpected query source/split')
         raw=pq.read_table(provenance['files'][split]['path'],columns=['question','answer']).to_pylist()
@@ -261,6 +263,8 @@ def _journal_source(spec, prepared, provenance, splits, backup_timeout):
     if spec['name'] == 'locomo':
         return _locomo_journal_source(spec, prepared, provenance, splits, backup_timeout)
     import pyarrow.parquet as pq
+    if 'split_journals' in spec:
+        return _split_journal_source(spec, provenance, splits)
     source=Path(spec['directory_root']).resolve()
     examples=[];memories={};banks={}; applied=Counter(); source_bank_hashes={}
     with journal_snapshot(source,backup_timeout) as db:
@@ -319,6 +323,76 @@ def _journal_source(spec, prepared, provenance, splits, backup_timeout):
     return examples,memories,banks,construction,applied
 
 
+def _split_journal_source(spec, provenance, splits):
+    """Join disjoint committed session addresses across the completed M builds."""
+    import pyarrow.parquet as pq
+    from .reuse_adjacent_directories import source_connection
+
+    banks, memories, examples, applied = {}, {}, [], Counter()
+    identities, proofs = {}, {}
+    for split in splits:
+        file = provenance['files'][split]
+        with ExitStack() as stack:
+            shards = []
+            for shard in spec['split_journals'][split]:
+                root = Path(shard['directory_root']).resolve()
+                db = stack.enter_context(closing(source_connection(root)))
+                db.execute('BEGIN')
+                identity = json.loads(db.execute("SELECT value FROM metadata WHERE key='identity'").fetchone()[0])
+                if identity != json.loads((root/'run_manifest.json').read_text()):
+                    raise ValueError(f'Journal identity mismatch: {root}')
+                patches, proof = _patches(shard.get('fallback_repairs'), 'fallback', root, identity, db)
+                identities[str(root)] = identity
+                proofs[str(root)] = proof
+                shards.append((db, identity, patches))
+            rows = pq.ParquetFile(file['path']).iter_batches(batch_size=1)
+            count = 0
+            for index, batch in enumerate(rows):
+                raw, = batch.to_pylist()
+                count += 1
+                example = adapt_row(raw, spec['name'], split, index)
+                mem = _memory(clean_history(raw))
+                example.memory_id = mem['memory_id']
+                bid = 'bank_' + digest([spec['name'], split, file['sha256'], index])[:24]
+                member = dict(sample_id=example.sample_id, split=split, row_index=index,
+                              original_question_id=raw['question_id'])
+                bank = dict(bank_id=bid, dataset=spec['name'], query_memberships=[member], issues=[], source_map=[])
+                parents = {}
+                for db, identity, patches in shards:
+                    saved = db.execute('SELECT payload FROM banks WHERE bank_id=?', (bid,)).fetchone()
+                    if not saved:
+                        continue
+                    original = json.loads(saved[0])
+                    if (original['bank_id'] != bid or original['query_memberships'] != [member]
+                            or original['dataset'] != spec['name']):
+                        raise ValueError(f'Unexpected source membership for {bid}')
+                    kept = set()
+                    for pid, source_hash, snapshot, encoded, status in db.execute(
+                            "SELECT parent_id,source_hash,snapshot,directory,status FROM sessions WHERE bank_id=? "
+                            "AND status IN ('complete','fallback')", (bid,)):
+                        if pid in parents:
+                            raise ValueError(f'Overlapping committed sessions: {bid}/{pid}')
+                        session, directory = json.loads(snapshot), json.loads(encoded)
+                        if session['parent_id'] != pid or session['source_hash'] != source_hash:
+                            raise ValueError(f'Session address or hash differs from journal: {bid}/{pid}')
+                        if status == 'fallback':
+                            directory = apply_repair_patch(directory, patches[(bid,pid)], session, identity)
+                            applied[f'{split}/fallback'] += 1
+                        parents[pid] = (session, directory)
+                        kept.add(pid)
+                    bank['source_map'].extend(r for r in original['source_map'] if r['parent_id'] in kept)
+                ordered = [parents[k] for k in sorted(parents)]
+                bank['sessions'] = [s for s,d in ordered]
+                bank['directories'] = [d for s,d in ordered]
+                validate_bank(bank)
+                _match_history(mem, bank)
+                banks[bid], memories[example.memory_id] = bank, mem
+                examples.append(example)
+            _check_input_counts(provenance['files'], split, count)
+    provenance.update(repair_overlays=proofs, selected_bank_hashes={bid:digest(b) for bid,b in banks.items()})
+    return examples, memories, banks, identities, applied
+
+
 def prepare_mixed(config, *, check_only=False, backup_timeout=120):
     data=config['data'];sources=data['sources'];splits=data['splits']; specs=data.get('source_specs',[])
     if (data.get('directory_protocol')!=PROTOCOL or data.get('layout','combined')!='combined'
@@ -327,13 +401,15 @@ def prepare_mixed(config, *, check_only=False, backup_timeout=120):
         raise ValueError('Mixed freeze requires ordered unique source_specs and train/validation only')
     target=Path(data['prepared_root']).resolve()
     for spec in specs:
-        if ('frozen_root' in spec)==('directory_root' in spec):
+        if sum(k in spec for k in ('frozen_root','directory_root','split_journals')) != 1:
             raise ValueError('Each source needs exactly one frozen_root or directory_root')
-        for key in ('input_root','frozen_root','directory_root','fallback_repairs','pending_repairs'):
-            if key in spec:
-                old=Path(spec[key]).resolve()
-                if target==old or old in target.parents or target in old.parents:
-                    raise ValueError('Mixed output must be independent of every source artifact')
+        artifacts = [spec, *(shard for shards in spec.get('split_journals', {}).values() for shard in shards)]
+        for artifact in artifacts:
+            for key in ('input_root','frozen_root','directory_root','fallback_repairs','pending_repairs'):
+                if key in artifact:
+                    old=Path(artifact[key]).resolve()
+                    if target==old or old in target.parents or target in old.parents:
+                        raise ValueError('Mixed output must be independent of every source artifact')
     all_examples=[];all_memories={};all_banks={}; identities={};provenance={};constructions={};reports={}
     for spec in specs:
         name=spec['name'];identities[name],proof=_inputs(spec,splits)

@@ -39,7 +39,8 @@ def allocated_devices(visible):
 
 
 def build_command(args, endpoints=None, embedding_endpoint=None):
-    module = ("agmem.build_qwen_m_eval_directories" if getattr(args, "m_eval", False)
+    module = ("agmem.build_qwen_m_test_missing" if getattr(args, "m_test_missing", False)
+              else "agmem.build_qwen_m_eval_directories" if getattr(args, "m_eval", False)
               else "agmem.build_segment_context_directories" if getattr(args, "segment_context", False)
               else "agmem.build_selected_topic_event_directories" if getattr(args, "scope_completion", False)
               else "agmem.repair_adjacent_fallbacks" if getattr(args, "repair_fallbacks", False)
@@ -108,10 +109,12 @@ def local_models(args, recipe):
 
 
 def writer_command(args, model, port, context_tokens=65536):
+    tp = getattr(args, "writer_tp", 1)
     return [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", model, "--served-model-name", "agmem-27b",
             "--host", "127.0.0.1", "--port", str(port), "--dtype", "bfloat16",
-            "--tensor-parallel-size", "1", "--max-model-len", str(context_tokens),
+            "--tensor-parallel-size", str(tp), *(["--distributed-executor-backend", "mp"] if tp > 1 else []),
+            "--max-model-len", str(context_tokens),
             "--max-num-seqs", str(args.max_num_seqs),
             "--max-num-batched-tokens", str(args.max_num_batched_tokens),
             "--gpu-memory-utilization", str(args.gpu_memory_utilization),
@@ -204,13 +207,17 @@ def launch(args):
             not getattr(args, 'topic_event', False) or getattr(args, 'repair_fallbacks', False)):
         raise ValueError('--scope-completion requires --topic-event without --repair-fallbacks')
     devices = None
+    tp = getattr(args, "writer_tp", 1)
     if not args.base_urls:
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         # CPU-only plans need no devices. If the user supplies an allocation,
         # validate its effective Writer capacity even during a dry run.
         if not args.dry_run or visible.strip() not in {"", "-1", "NoDevFiles"}:
             devices = allocated_devices(visible)
-            _validate_writer_capacity(args, len(devices) - 1)
+            if (len(devices) - 1) % tp:
+                raise ValueError("Writer GPU count must be divisible by --writer-tp")
+            writer_groups = [devices[i:i + tp] for i in range(1, len(devices), tp)]
+            _validate_writer_capacity(args, len(writer_groups))
     reuse_root = getattr(args, "reuse_root", None)
     reuse_mapping = getattr(args, "reuse_mapping", None)
     if bool(reuse_root) != bool(reuse_mapping):
@@ -294,7 +301,7 @@ def launch(args):
                     f"for i in range({gpu_count}):\n"
                     " free,total=torch.cuda.mem_get_info(i)\n"
                     " print(json.dumps({'gpu':i,'role':'embedding' if i==0 else 'writer','name':torch.cuda.get_device_name(i),'free_gib':free/2**30,'total_gib':total/2**30}),flush=True)\n"
-                    " assert i==0 or total >= 70*2**30, 'Each Writer requires an 80-GB-class GPU for this configuration'\n"
+                    f" assert i==0 or total * {tp} >= 70*2**30, 'Insufficient total device memory per Writer replica'\n"
                     " assert free/total >= fractions[i], 'GPU is occupied: stop the existing service before launching the new build'\n"
                     " (torch.ones((32,32),device=f'cuda:{i}') @ torch.ones((32,32),device=f'cuda:{i}')).sum().item()\n"
                 )
@@ -303,7 +310,7 @@ def launch(args):
                     raise RuntimeError(f"CUDA/vLLM preflight failed; inspect {job / 'cuda_preflight.log'}. "
                                        "Existing training/build/service processes are never stopped by this launcher.")
                 ports = []
-                for _ in devices:
+                for _ in range(len(writer_groups) + 1):
                     port = free_port()
                     while port in ports:
                         port = free_port()
@@ -311,9 +318,9 @@ def launch(args):
                 urls = [f"http://127.0.0.1:{port}/v1" for port in ports]
                 atomic_json(job / "deployment.json", {
                     "writer_model": writer_model, "embedding_model": embedding_model,
-                    "tensor_parallel_size": 1, "writer_workers": args.workers,
-                    "writer_replicas": [{"gpu": device, "base_url": url}
-                                        for device, url in zip(devices[1:], urls[1:])],
+                    "tensor_parallel_size": tp, "writer_workers": args.workers,
+                    "writer_replicas": [{"gpu": ",".join(group), "base_url": url}
+                                        for group, url in zip(writer_groups, urls[1:])],
                     "writer_context_tokens": context_tokens,
                     "max_num_seqs_per_writer": args.max_num_seqs,
                     "writer_max_num_batched_tokens": args.max_num_batched_tokens,
@@ -334,13 +341,13 @@ def launch(args):
                 wait_embedding_ready(embedding_server, ports[0], job / "embedding.log",
                                      expected_dimensions=embedding_dimensions)
                 # Sequential loading limits host RAM peaks; inference is concurrent.
-                for index, (device, port) in enumerate(zip(devices[1:], ports[1:]), 1):
+                for index, (group, port) in enumerate(zip(writer_groups, ports[1:]), 1):
                     name = f"writer_{index}"
-                    process = start(name, writer_command(args, writer_model, port, context_tokens), device)
+                    process = start(name, writer_command(args, writer_model, port, context_tokens), ",".join(group))
                     servers.append((name, process))
                     wait_ready(process, port, job / f"{name}.log")
                 worker = start("directories", build_command(args, urls[1:], urls[0]), "")
-                print(f"Embedding and {len(devices) - 1} Writer replica(s) are ready; "
+                print(f"Embedding and {len(writer_groups)} Writer replica(s) are ready; "
                       f"progress: {job.resolve() / 'directories.log'}", flush=True)
                 while worker.poll() is None:
                     failed = [name for name, process in servers if process.poll() is not None]
@@ -376,6 +383,7 @@ def argument_parser():
     parser.add_argument("--repair-fallbacks", action="store_true",
                         help="Repair existing fallback sessions only; do not enqueue unfinished sessions")
     version = parser.add_mutually_exclusive_group()
+    version.add_argument("--m-test-missing", action="store_true", help="Fill missing LongMemEval-M test sessions")
     version.add_argument("--m-eval", action="store_true",
                          help="Build M validation/test using the compact boundary and one-block context recipe")
     version.add_argument("--topic-event", action="store_true",
@@ -398,6 +406,7 @@ def argument_parser():
     parser.add_argument("--base-urls", nargs="+", help="Reuse running Writers together with --embedding-base-url")
     parser.add_argument("--embedding-base-url", help="Reuse an embedding service together with --base-urls")
     parser.add_argument("--max-num-seqs", type=int, default=64, help="Per Writer GPU")
+    parser.add_argument("--writer-tp", choices=[1, 2], type=int, default=1)
     parser.add_argument("--max-num-batched-tokens", type=int, default=4096, help="Per Writer GPU")
     parser.add_argument("--gpu-memory-utilization", type=float, default=.90, help="Per Writer GPU")
     parser.add_argument("--embedding-max-model-len", type=int, default=8192)

@@ -1,4 +1,4 @@
-"""Train a single-GPU hierarchical Reader with one frozen local Task/Judge model.
+"""Train a hierarchical Reader on one or two GPUs with a dedicated Task/Judge GPU.
 
 No Slurm job is required. Select the allocated Reader/Task devices explicitly
 with CUDA_VISIBLE_DEVICES, for example 4,5. Checkpoints retain optimizer state.
@@ -32,13 +32,16 @@ DEFAULT_CONFIG = 'configs/train_dapo_locomo_lmes_hierarchical_f1_2gpu.yaml'
 GIB = 1024 ** 3
 
 
-def gpu_roles(visible):
+def gpu_roles(visible, reader_size=1):
+    if type(reader_size) is not int or reader_size not in (1, 2):
+        raise ValueError('reader.model_parallel_size must be 1 or 2')
     devices = [s.strip() for s in visible.split(',')]
-    if (len(devices) != 2 or len(set(devices)) != 2
+    count = reader_size + 1
+    if (len(devices) != count or len(set(devices)) != count
             or any(s in {'', '-1', 'NoDevFiles'} for s in devices)):
-        raise ValueError('Select exactly two distinct allocated GPUs in CUDA_VISIBLE_DEVICES '
-                         '(Reader,Task), for example 4,5')
-    return {'reader': devices[0], 'task': devices[1]}
+        raise ValueError(f'Select {count} distinct allocated GPUs in CUDA_VISIBLE_DEVICES '
+                         f'({reader_size} for the Reader followed by one for Task/Judge)')
+    return {'reader': ','.join(devices[:-1]), 'task': devices[-1]}
 
 
 def training_config(path, output_dir=None):
@@ -232,7 +235,9 @@ def launch(args):
     if not enforce_storage:
         print(f"Storage reserve enforcement disabled by configuration; "
               f"available space: {report['storage']['free_bytes']/GIB:.1f} GiB (informational).", flush=True)
-    roles = gpu_roles(os.environ.get('CUDA_VISIBLE_DEVICES', ''))
+    reader_size = config['reader'].get('model_parallel_size', 1)
+    roles = gpu_roles(os.environ.get('CUDA_VISIBLE_DEVICES', ''), reader_size)
+    gpu_count = reader_size + 1
     destination = Path(config['training']['output_dir'])
     if (destination == Path(config['data']['prepared_root'])
             or destination in Path(config['data']['prepared_root']).parents
@@ -245,7 +250,8 @@ def launch(args):
         if not args.resume and destination.exists() and any(destination.iterdir()):
             raise ValueError('Training output already exists; use --resume or a new --output-dir')
         stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-        job = destination.parent/'jobs'/f'two-gpu-{stamp}-{os.getpid()}'
+        job_prefix = 'three-gpu' if reader_size == 2 else 'two-gpu'
+        job = destination.parent/'jobs'/f'{job_prefix}-{stamp}-{os.getpid()}'
         job.mkdir(parents=True, exist_ok=False)
         atomic_json(job/'preflight.json', report)
         atomic_json(job/'gpu_roles.json', roles)
@@ -274,8 +280,8 @@ def launch(args):
                 for signum in (signal.SIGINT, signal.SIGTERM):
                     handlers[signum] = signal.signal(signum, interrupted)
                 probe = ('import json, torch; import vllm._C\n'
-                         "assert torch.cuda.is_available() and torch.cuda.device_count()==2, 'Expected two CUDA GPUs'\n"
-                         'for i in range(2):\n'
+                         f"assert torch.cuda.is_available() and torch.cuda.device_count()=={gpu_count}, 'Expected {gpu_count} CUDA GPUs'\n"
+                         f'for i in range({gpu_count}):\n'
                          ' free,total=torch.cuda.mem_get_info(i)\n'
                          " print(json.dumps({'gpu':i,'name':torch.cuda.get_device_name(i),'free_gib':free/2**30,'total_gib':total/2**30}),flush=True)\n"
                          " assert total>=70*2**30, 'Each selected device must be an 80GB-class GPU'\n"
@@ -302,7 +308,7 @@ def launch(args):
                 if args.max_updates is not None:
                     command.extend(['--max-groups', str(args.max_updates)])
                 trainer = start('train', command, roles['reader'],
-                                {'AGMEM_READER_MODEL_PARALLEL_SIZE': '1', 'OMP_NUM_THREADS': '8'})
+                                {'AGMEM_READER_MODEL_PARALLEL_SIZE': str(reader_size), 'OMP_NUM_THREADS': '8'})
                 recipe = ('Full-directory ORM' if config['reward']['formula'] == 'full_directory_orm_v1'
                           else 'Judge+F1 ORM' if config['reward']['formula'] == 'judge_f1_cost_v1' else 'F1-ORM')
                 print(f'{recipe} training started; progress: {job.resolve()/"train.log"}', flush=True)

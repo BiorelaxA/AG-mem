@@ -1,0 +1,40 @@
+extends: train_dapo_locomo_lmes_full_directory_orm.yaml
+data:
+  sources: [locomo, split_longmemeval_s, split_longmemeval_m]
+  input_roots:
+    split_longmemeval_m: &lme data/processed/longmemeval_315_35_150_seed42_20261113
+  prepared_root: runs/locomo_lmes_lmem_full_directory_orm/prepared
+  source_specs:
+    - name: locomo
+      input_root: data/processed/locomo_query9010_seed42_20261102
+      frozen_root: &previous runs/locomo_lmes_context3_open1_nav06/prepared
+      expected_counts: {train: 1019, validation: 115}
+    - name: split_longmemeval_s
+      input_root: *lme
+      frozen_root: *previous
+      expected_counts: {train: 315, validation: 35}
+    - name: split_longmemeval_m
+      input_root: *lme
+      expected_counts: {train: 315, validation: 35}
+      split_journals:
+        train:
+          - directory_root: runs/parent_child_directories/longmemeval_m_train_merged_20261123
+            fallback_repairs: runs/fallback_repair/longmemeval_m_train_deepseek_400_600/longmemeval_m_train_merged_20261123
+          - directory_root: runs/parent_child_directories/deepseek_flash_lmem_train_missing_seg1
+            fallback_repairs: runs/fallback_repair/longmemeval_m_train_deepseek_400_600/deepseek_flash_lmem_train_missing_seg1
+        validation:
+          - directory_root: runs/parent_child_directories/qwen27b_lmem_eval_context1_v1
+            fallback_repairs: runs/fallback_repair/longmemeval_m_validation_deepseek_400_600/qwen27b_lmem_eval_context1_v1
+models:
+  reader_path: /home/share/models/Qwen3.5-4B
+  task_path: /home/share/models/Qwen3.5-27B
+reader:
+  model_parallel_size: 2
+  yarn_factor: 4.0
+  max_context_tokens: 1010000
+  max_new_tokens_per_decision: 256
+training:
+  initial_query_ids: []
+  output_dir: runs/locomo_lmes_lmem_full_directory_orm/train
+jobs:
+  experiment_name: locomo_lmes_lmem_full_directory_orm

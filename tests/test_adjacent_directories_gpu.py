@@ -51,7 +51,8 @@ class AdjacentDirectoryLauncherTests(unittest.TestCase):
                     "writer" if "vllm.entrypoints.openai.api_server" in command else
                     "worker" if any(module in command for module in (
                         "agmem.build_adjacent_directories", "agmem.repair_adjacent_fallbacks",
-                        "agmem.build_topic_event_directories", "agmem.build_qwen_m_eval_directories", "agmem.build_segment_context_directories")) else "preflight")
+                        "agmem.build_topic_event_directories", "agmem.build_qwen_m_eval_directories",
+                        "agmem.build_qwen_m_test_missing", "agmem.build_segment_context_directories")) else "preflight")
             process = Process(kind, preflight_code if kind == "preflight" else worker_code)
             calls.append((kind, command, kwargs, process))
             return process
@@ -111,6 +112,19 @@ class AdjacentDirectoryLauncherTests(unittest.TestCase):
         self.assertEqual(deployment["embedding"]["client_concurrency"], 4)
         self.assertEqual(deployment["embedding"]["client_batch_size"], 32)
         self.assertEqual(deployment["embedding"]["expected_dimensions"], 2560)
+
+    def test_three_a6000_use_one_two_gpu_writer_for_test_gaps(self):
+        args = self.args(m_test_missing=True, writer_tp=2, workers=64, splits=["test"])
+        calls, _, result = self.run_launch(args, visible="2,4,6")
+        self.assertIsInstance(result, Path)
+        self.assertEqual([(kind, opts["env"]["CUDA_VISIBLE_DEVICES"]) for kind, _, opts, _ in calls],
+                         [("preflight", "2,4,6"), ("embedding", "2"), ("writer", "4,6"), ("worker", "")])
+        writer = calls[2][1]
+        self.assertEqual(writer[writer.index("--tensor-parallel-size") + 1], "2")
+        self.assertEqual(writer[writer.index("--max-num-seqs") + 1], "64")
+        self.assertIn("agmem.build_qwen_m_test_missing", calls[-1][1])
+        self.assertEqual(calls[-1][1][-4:], ["--base-urls", "http://127.0.0.1:10101/v1",
+                                             "--embedding-base-url", "http://127.0.0.1:10100/v1"])
 
     def test_four_gpu_m_eval_routes_three_local_writer_endpoints(self):
         calls, stopped, result = self.run_launch(

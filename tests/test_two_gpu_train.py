@@ -191,6 +191,15 @@ class TwoGpuTrainTests(unittest.TestCase):
         self.assertEqual(command[command.index('--max-groups')+1],'3')
         self.assertEqual(command[command.index('--resume')+1],str(self.root/'train/checkpoint-00000004'))
 
+    def test_two_reader_gpus_and_one_shared_task_judge_gpu(self):
+        self.cfg['reader']['model_parallel_size'] = 2
+        result, calls, _, _ = self.workflow(environ={'CUDA_VISIBLE_DEVICES': '3,5,7'})
+        self.assertIsInstance(result, Path)
+        self.assertEqual([call[2]['env']['CUDA_VISIBLE_DEVICES'] for call in calls], ['3,5,7', '7', '3,5'])
+        self.assertEqual(calls[2][2]['env']['AGMEM_READER_MODEL_PARALLEL_SIZE'], '2')
+        self.assertNotIn('AGMEM_READER_MODEL_PARALLEL_SIZE', calls[1][2]['env'])
+        self.assertIn('torch.cuda.device_count()==3', calls[0][1][-1])
+
     def test_exactly_two_distinct_devices(self):
         self.assertEqual(launch.gpu_roles('4,5'),{'reader':'4','task':'5'})
         for value in ('','4','4,4','4,5,6','4,','-1,5'):

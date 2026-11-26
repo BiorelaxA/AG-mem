@@ -36,7 +36,35 @@ def chat_token_ids(tokenizer, messages) -> list[int]:
     return ids
 
 
-def load_model(path, device, dtype="bfloat16", checkpointing=False):
+def reader_yarn_config(path, settings):
+    """Construct the Reader's extended HF config before rotary buffers are initialized."""
+    from transformers import AutoConfig
+    import math
+
+    config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+    text = config.text_config
+    rope = text.rope_parameters
+    original = rope.get("original_max_position_embeddings", text.max_position_embeddings)
+    factor = settings["yarn_factor"]
+    limit = settings["max_context_tokens"]
+    if (type(factor) not in (int, float) or not math.isfinite(factor) or factor <= 1
+            or type(limit) is not int or not original < limit <= original * factor):
+        raise ValueError("Reader YaRN requires native length < max_context_tokens <= native length * yarn_factor")
+    scaled_positions = int(original * factor)
+    if rope["rope_type"] == "yarn":
+        if rope.get("factor") != factor or text.max_position_embeddings != scaled_positions:
+            raise ValueError("Reader checkpoint YaRN settings differ from the requested training recipe")
+    elif rope["rope_type"] != "default":
+        raise ValueError(f"Cannot apply Reader YaRN to existing RoPE type {rope['rope_type']}")
+    text.rope_parameters = {**rope, "rope_type": "yarn", "factor": float(factor),
+                            "original_max_position_embeddings": original}
+    # Keep HF's positional range consistent with the RoPE factor. The policy
+    # separately enforces the (possibly lower) supported prompt + output limit.
+    text.max_position_embeddings = scaled_positions
+    return config
+
+
+def load_model(path, device, dtype="bfloat16", checkpointing=False, reader_settings=None):
     import os
     import torch
     from .model_parallel import place_reader_layers, reader_devices
@@ -45,8 +73,16 @@ def load_model(path, device, dtype="bfloat16", checkpointing=False):
         from transformers import Qwen3_5ForConditionalGeneration
     except ImportError as exc:
         raise RuntimeError("Use the provided new Conda environment: current Transformers lacks Qwen3.5") from exc
+    overrides = {}
+    if reader_settings and reader_settings.get("yarn_factor") is not None:
+        config = reader_yarn_config(path, reader_settings)
+        overrides["config"] = config
+        print(json.dumps({"event": "reader_yarn", "context_limit": reader_settings["max_context_tokens"],
+                          "max_position_embeddings": config.text_config.max_position_embeddings,
+                          "rope_parameters": config.text_config.rope_parameters}), flush=True)
     model = Qwen3_5ForConditionalGeneration.from_pretrained(path, local_files_only=True, trust_remote_code=False,
-                                                          dtype=getattr(torch, dtype), attn_implementation="sdpa")
+                                                          dtype=getattr(torch, dtype), attn_implementation="sdpa",
+                                                          **overrides)
     for module in model.modules():
         if isinstance(module, torch.nn.Dropout):
             module.p = 0.0
